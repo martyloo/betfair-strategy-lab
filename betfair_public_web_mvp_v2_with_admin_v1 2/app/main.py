@@ -13,7 +13,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel,Field
 from starlette.middleware.sessions import SessionMiddleware
 
-ENGINE="public-web-v3.1-gb"; ROOT=Path(os.getenv("BETFAIR_WEB_CACHE",Path.home()/".betfair-public-web-cache"));ROOT.mkdir(parents=True,exist_ok=True)
+ENGINE="public-web-v3.2-gb-multi"; ROOT=Path(os.getenv("BETFAIR_WEB_CACHE",Path.home()/".betfair-public-web-cache"));ROOT.mkdir(parents=True,exist_ok=True)
 WORKERS=max(1,int(os.getenv("BACKTEST_WORKERS","4"))); MAX_BETS=max(100,int(os.getenv("MAX_BETS_RETURNED","5000")))
 POOL=ThreadPoolExecutor(max_workers=WORKERS,thread_name_prefix="backtest"); LOCK=threading.Lock(); JOBS={}
 API_BASE="https://historicdata.betfair.com/api/"
@@ -349,7 +349,7 @@ def filter_options(plan:str="Basic Plan",country:str="GB"):
     keys=r.list_any(base)
     venues=set();distances=set();codes=set();cats=set();grades=set()
     # metadata only: read columns from enriched files; cap is deliberately generous
-    for k in keys[:5000]:
+    for k in keys:
         if f"/country={country.upper()}/" not in k: continue
         try:
             path=local(k); r.download(k,path) if not path.exists() else None
@@ -361,6 +361,12 @@ def filter_options(plan:str="Basic Plan",country:str="GB"):
     def dkey(x):
         m=re.match(r"(?:(\d+)m)?(?:(\d+)f)?",x)
         return (int(m.group(1) or 0)*8+int(m.group(2) or 0)) if m else 9999
+    # Distance remains usable before a full enrichment has completed. These are
+    # normal GB racing increments; values discovered in the user's data are merged in.
+    fallback_distances={"5f","6f","7f","1m","1m1f","1m2f","1m3f","1m4f","1m5f","1m6f","1m7f",
+                        "2m","2m1f","2m2f","2m3f","2m4f","2m5f","2m6f","2m7f","3m","3m1f",
+                        "3m2f","3m3f","3m4f","3m5f","3m6f"}
+    distances.update(fallback_distances)
     return {"venues":sorted(venues),"distances":sorted(distances,key=dkey),"race_codes":sorted(codes),
             "race_categories":sorted(cats),"race_grades":sorted(grades)}
 
