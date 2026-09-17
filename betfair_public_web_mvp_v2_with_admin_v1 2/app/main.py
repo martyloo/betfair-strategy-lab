@@ -13,7 +13,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel,Field
 from starlette.middleware.sessions import SessionMiddleware
 
-ENGINE="public-web-v3.0"; ROOT=Path(os.getenv("BETFAIR_WEB_CACHE",Path.home()/".betfair-public-web-cache"));ROOT.mkdir(parents=True,exist_ok=True)
+ENGINE="public-web-v3.1-gb"; ROOT=Path(os.getenv("BETFAIR_WEB_CACHE",Path.home()/".betfair-public-web-cache"));ROOT.mkdir(parents=True,exist_ok=True)
 WORKERS=max(1,int(os.getenv("BACKTEST_WORKERS","4"))); MAX_BETS=max(100,int(os.getenv("MAX_BETS_RETURNED","5000")))
 POOL=ThreadPoolExecutor(max_workers=WORKERS,thread_name_prefix="backtest"); LOCK=threading.Lock(); JOBS={}
 API_BASE="https://historicdata.betfair.com/api/"
@@ -32,7 +32,6 @@ class Market:
     number_of_winners:int|None=None; in_play_enabled:bool|None=None; cross_matching:bool|None=None
     discount_allowed:bool|None=None; persistence_enabled:bool|None=None
     race_code:str=""; distance:str=""; handicap_status:str=""; race_category:str=""; race_grade:str=""
-    race_codes:list[str]=[]; distances:list[str]=[]; handicap_status:str|None=None; race_categories:list[str]=[]; race_grades:list[str]=[]
 @dataclass
 class Bet:
     market_id:str;market_time:str;event_name:str;country:str;horse:str;bsp:float;bet_type:str;won:bool;stake:float;liability:float;gross:float;commission:float;net:float
@@ -188,11 +187,13 @@ class Req(BaseModel):
     from_date:date;to_date:date;countries:list[str]=Field(min_length=1);plan:str="Basic Plan";strategy:str="Lay longest outsider";nth:int=Field(2,ge=1,le=100)
     min_odds:float=Field(1.01,ge=1.01,le=1000);max_odds:float=Field(1000,ge=1.01,le=1000);min_runners:int=Field(2,ge=2);max_runners:int=Field(0,ge=0)
     stake_mode:str="Fixed stake";amount:float=Field(1.0,gt=0);commission:float=Field(2.0,ge=0,le=100)
-    venues:list[str]=[];days_of_week:list[int]=[];months_of_year:list[int]=[];time_from:str|None=None;time_to:str|None=None
+    venues:list[str]=Field(default_factory=list);days_of_week:list[int]=Field(default_factory=list);months_of_year:list[int]=Field(default_factory=list);time_from:str|None=None;time_to:str|None=None
     fav_min_bsp:float|None=None;fav_max_bsp:float|None=None;second_min_bsp:float|None=None;second_max_bsp:float|None=None
     fav_gap_min:float|None=None;fav_gap_max:float|None=None;overround_min:float|None=None;overround_max:float|None=None
     number_of_winners:int|None=None;in_play_enabled:bool|None=None;bet_delay:int|None=None;betting_type:str|None=None
     market_base_rate_min:float|None=None;market_base_rate_max:float|None=None;cross_matching:bool|None=None;discount_allowed:bool|None=None;persistence_enabled:bool|None=None
+    race_codes:list[str]=Field(default_factory=list);distances:list[str]=Field(default_factory=list);handicap_status:str|None=None
+    race_categories:list[str]=Field(default_factory=list);race_grades:list[str]=Field(default_factory=list)
     selected_ltp_min:float|None=None;selected_ltp_max:float|None=None;selected_adjustment_min:float|None=None;selected_adjustment_max:float|None=None
     selected_sort_priority_min:int|None=None;selected_sort_priority_max:int|None=None
 
@@ -351,7 +352,7 @@ def filter_options(plan:str="Basic Plan",country:str="GB"):
     for k in keys[:5000]:
         if f"/country={country.upper()}/" not in k: continue
         try:
-            path=CACHE.get(r,k)
+            path=local(k); r.download(k,path) if not path.exists() else None
             d=pq.read_table(path,columns=["venue","distance","race_code","race_category","race_grade"]).to_pydict()
             for field,target in [("venue",venues),("distance",distances),("race_code",codes),("race_category",cats),("race_grade",grades)]:
                 for v in d.get(field,[]) or []:
