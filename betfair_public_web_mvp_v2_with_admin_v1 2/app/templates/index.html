@@ -5,13 +5,25 @@
 <section><h3>Countries</h3><div id="countries" class="countries">{% for c in countries %}<label><input type="checkbox" value="{{c}}" {% if c=='GB' %}checked{% endif %}><span>{{c}}</span></label>{% endfor %}</div></section>
 <section><h3>Strategy</h3><label>Selection rule<select id="strategy"><option>Lay longest outsider</option><option>Back longest outsider</option><option>Lay favourite</option><option>Back favourite</option><option>Lay Nth favourite</option><option>Back Nth favourite</option></select></label><label>Nth favourite<input id="nth" type="number" value="2" min="1"></label><div class="two"><label>Min BSP<input id="minOdds" type="number" value="1.01" step=".01"></label><label>Max BSP<input id="maxOdds" type="number" value="1000" step=".01"></label></div><div class="two"><label>Min runners<input id="minRunners" type="number" value="2"></label><label>Max runners<input id="maxRunners" type="number" value="0"></label></div></section>
 <section><details class="advanced"><summary><b>Advanced race filters</b><span>Optional · blank = all races</span></summary><div class="advancedbody">
-<label>Venue<select id="venues"><option value="">Any venue</option></select></label>
+<label>Venue
+<select id="venues" multiple size="8" class="multi-filter" aria-label="Venues"></select>
+<small>Leave unselected for any venue. Select multiple with Ctrl/Cmd-click.</small>
+</label>
 <h4>GB race details</h4>
-<div class="two"><label>Race code<select id="raceCode"><option value="">Any</option><option>Flat</option><option>Hurdle</option><option>Chase</option><option>NH Flat / Bumper</option></select></label>
-<label>Distance<select id="distance"><option value="">Any distance</option></select></label></div>
+<div class="two"><label>Race code
+<select id="raceCode" multiple size="4" class="multi-filter"><option>Flat</option><option>Hurdle</option><option>Chase</option><option>NH Flat / Bumper</option></select>
+<small>Leave unselected for any race code.</small></label>
+<label>Distance
+<select id="distance" multiple size="8" class="multi-filter" aria-label="Distances"></select>
+<small>Leave unselected for any distance. Select multiple with Ctrl/Cmd-click.</small>
+</label></div>
 <div class="two"><label>Handicap<select id="handicap"><option value="">Any</option><option>Handicap</option><option>Non-handicap</option></select></label>
-<label>Race category<select id="raceCategory"><option value="">Any</option><option>Maiden</option><option>Novice</option><option>Nursery</option><option>Stakes</option><option>Conditions</option><option>Selling</option><option>Claiming</option><option>Other</option></select></label></div>
-<label>Race grade<select id="raceGrade"><option value="">Any grade</option><option>Group 1</option><option>Group 2</option><option>Group 3</option><option>Grade 1</option><option>Grade 2</option><option>Grade 3</option><option>Listed</option></select></label><div class="two"><label>Race time from<input id="timeFrom" type="time"></label><label>Race time to<input id="timeTo" type="time"></label></div>
+<label>Race category
+<select id="raceCategory" multiple size="8" class="multi-filter"><option>Maiden</option><option>Novice</option><option>Nursery</option><option>Stakes</option><option>Conditions</option><option>Selling</option><option>Claiming</option><option>Other</option></select>
+<small>Leave unselected for any category.</small></label></div>
+<label>Race grade
+<select id="raceGrade" multiple size="7" class="multi-filter"><option>Group 1</option><option>Group 2</option><option>Group 3</option><option>Grade 1</option><option>Grade 2</option><option>Grade 3</option><option>Listed</option></select>
+<small>Leave unselected for any grade.</small></label><div class="two"><label>Race time from<input id="timeFrom" type="time"></label><label>Race time to<input id="timeTo" type="time"></label></div>
 <label>Days of week<div class="checks" id="days"><label><input type="checkbox" value="0">Mon</label><label><input type="checkbox" value="1">Tue</label><label><input type="checkbox" value="2">Wed</label><label><input type="checkbox" value="3">Thu</label><label><input type="checkbox" value="4">Fri</label><label><input type="checkbox" value="5">Sat</label><label><input type="checkbox" value="6">Sun</label></div></label>
 <label>Months<div class="checks" id="months">{% for m in range(1,13) %}<label><input type="checkbox" value="{{m}}">{{m}}</label>{% endfor %}</div></label>
 <h4>Market prices</h4><div class="two"><label>Favourite BSP min<input id="favMin" type="number" step=".01" placeholder="Any"></label><label>Favourite BSP max<input id="favMax" type="number" step=".01" placeholder="Any"></label></div>
@@ -35,5 +47,4 @@
 <div id="curve" class="panel active"><canvas id="chart"></canvas><p id="empty">Your cumulative profit curve will appear here.</p></div>
 <div id="bands" class="panel"><div class="scroll"><table><thead><tr><th>BSP band</th><th>Bets</th><th>Wins</th><th>Strike</th><th>Gross</th><th>Net</th><th>ROI</th></tr></thead><tbody id="bandrows"></tbody></table></div></div>
 <div id="betlist" class="panel"><div class="scroll"><table><thead><tr><th>Time</th><th>Country</th><th>Event</th><th>Horse</th><th>BSP</th><th>Bet</th><th>Result</th><th>Net</th></tr></thead><tbody id="betrows"></tbody></table></div><small id="trunc"></small></div>
-<div id="details" class="panel"><div id="detailgrid" class="detailgrid">No completed run yet.</div></div></div></main></div><script src="/static/app.js"></script></body></html><div id="betlist" class="panel"><div class="scroll"><table><thead><tr><th>Time</th><th>Country</th><th>Event</th><th>Horse</th><th>BSP</th><th>Bet</th><th>Result</th><th>Net</th></tr></thead><tbody id="betrows"></tbody></table></div><small id="trunc"></small></div>
 <div id="details" class="panel"><div id="detailgrid" class="detailgrid">No completed run yet.</div></div></div></main></div><script src="/static/app.js"></script></body></html>
