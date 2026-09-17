@@ -31,6 +31,8 @@ class Market:
     venue:str=""; bet_delay:int|None=None; betting_type:str=""; market_base_rate:float|None=None
     number_of_winners:int|None=None; in_play_enabled:bool|None=None; cross_matching:bool|None=None
     discount_allowed:bool|None=None; persistence_enabled:bool|None=None
+    race_code:str=""; distance:str=""; handicap_status:str=""; race_category:str=""; race_grade:str=""
+    race_codes:list[str]=[]; distances:list[str]=[]; handicap_status:str|None=None; race_categories:list[str]=[]; race_grades:list[str]=[]
 @dataclass
 class Bet:
     market_id:str;market_time:str;event_name:str;country:str;horse:str;bsp:float;bet_type:str;won:bool;stake:float;liability:float;gross:float;commission:float;net:float
@@ -217,7 +219,8 @@ def readm(path):
         def at(name,default=None):
             x=d.get(name);return x[i] if x and i<len(x) else default
         rs.append(Runner(int(at("selection_id")),str(at("horse","")),float(at("bsp")),bool(at("winner",False)),safe_float(at("adjustment_factor")),int(at("sort_priority")) if at("sort_priority") is not None else None,str(at("runner_status","")),safe_float(at("ltp"))))
-    return Market(str(_col(d,"market_id","")),str(_col(d,"market_time","")),str(_col(d,"event_name","")),str(_col(d,"country","")).upper(),rs,str(_col(d,"venue","") or ""),_col(d,"bet_delay"),str(_col(d,"betting_type","") or ""),safe_float(_col(d,"market_base_rate")),_col(d,"number_of_winners"),_col(d,"in_play_enabled"),_col(d,"cross_matching"),_col(d,"discount_allowed"),_col(d,"persistence_enabled"))
+    return Market(str(_col(d,"market_id","")),str(_col(d,"market_time","")),str(_col(d,"event_name","")),str(_col(d,"country","")).upper(),rs,str(_col(d,"venue","") or ""),_col(d,"bet_delay"),str(_col(d,"betting_type","") or ""),safe_float(_col(d,"market_base_rate")),_col(d,"number_of_winners"),_col(d,"in_play_enabled"),_col(d,"cross_matching"),_col(d,"discount_allowed"),_col(d,"persistence_enabled"),
+                  str(_col(d,"race_code","") or ""),str(_col(d,"distance","") or ""),str(_col(d,"handicap_status","") or ""),str(_col(d,"race_category","") or ""),str(_col(d,"race_grade","") or ""))
 def mdate(m):
     try:return datetime.fromisoformat(m.market_time.replace("Z","+00:00")).date()
     except:return None
@@ -291,6 +294,11 @@ def market_filters(m,q):
     if q.cross_matching is not None and m.cross_matching!=q.cross_matching:return False
     if q.discount_allowed is not None and m.discount_allowed!=q.discount_allowed:return False
     if q.persistence_enabled is not None and m.persistence_enabled!=q.persistence_enabled:return False
+    if q.race_codes and m.race_code not in q.race_codes:return False
+    if q.distances and m.distance not in q.distances:return False
+    if q.handicap_status and m.handicap_status!=q.handicap_status:return False
+    if q.race_categories and m.race_category not in q.race_categories:return False
+    if q.race_grades and m.race_grade not in q.race_grades:return False
     return True
 def runner_filters(r,q):
     return between(r.ltp,q.selected_ltp_min,q.selected_ltp_max) and between(r.adjustment_factor,q.selected_adjustment_min,q.selected_adjustment_max) and between(r.sort_priority,q.selected_sort_priority_min,q.selected_sort_priority_max)
@@ -333,6 +341,28 @@ app=FastAPI(title="Betfair Strategy Lab");app.add_middleware(SessionMiddleware,s
 app.mount("/static",StaticFiles(directory=BASE/"static"),name="static");templates=Jinja2Templates(directory=BASE/"templates")
 @app.get("/",response_class=HTMLResponse)
 def home(request:Request):return templates.TemplateResponse(request=request,name="index.html",context={"countries":COUNTRIES})
+
+@app.get("/api/filter-options")
+def filter_options(plan:str="Basic Plan",country:str="GB"):
+    r=R2(); base=f"processed-enriched/horse-racing/win/{slug(plan)}/"
+    keys=r.list_any(base)
+    venues=set();distances=set();codes=set();cats=set();grades=set()
+    # metadata only: read columns from enriched files; cap is deliberately generous
+    for k in keys[:5000]:
+        if f"/country={country.upper()}/" not in k: continue
+        try:
+            path=CACHE.get(r,k)
+            d=pq.read_table(path,columns=["venue","distance","race_code","race_category","race_grade"]).to_pydict()
+            for field,target in [("venue",venues),("distance",distances),("race_code",codes),("race_category",cats),("race_grade",grades)]:
+                for v in d.get(field,[]) or []:
+                    if v: target.add(str(v))
+        except Exception: continue
+    def dkey(x):
+        m=re.match(r"(?:(\d+)m)?(?:(\d+)f)?",x)
+        return (int(m.group(1) or 0)*8+int(m.group(2) or 0)) if m else 9999
+    return {"venues":sorted(venues),"distances":sorted(distances,key=dkey),"race_codes":sorted(codes),
+            "race_categories":sorted(cats),"race_grades":sorted(grades)}
+
 @app.get("/api/health")
 def health():
     try:r=R2();r.test();return {"ok":True,"r2":True,"workers":WORKERS,"engine":ENGINE}
