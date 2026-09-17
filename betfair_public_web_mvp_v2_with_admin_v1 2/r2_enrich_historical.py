@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import argparse,bz2,gzip,hashlib,json,math,os,tempfile
+import argparse,bz2,gzip,hashlib,json,math,os,re,tempfile
 from datetime import datetime,timezone
 from pathlib import Path
 import boto3,pyarrow as pa,pyarrow.parquet as pq
@@ -24,6 +24,32 @@ def listing(s3,b,p):
   token=z.get("NextContinuationToken")
 def op(p):
  return bz2.open(p,"rt",encoding="utf8",errors="ignore") if p.suffix.lower()==".bz2" else gzip.open(p,"rt",encoding="utf8",errors="ignore") if p.suffix.lower()==".gz" else open(p,"rt",encoding="utf8",errors="ignore")
+def gb_parse(name,country):
+ if country!="GB": return "","","","",""
+ t=(name or "").strip()
+ dm=re.match(r"^\s*((?:\d+m)?(?:\d+f)?(?:\d+y)?)\b",t,re.I)
+ dist=dm.group(1).lower() if dm and dm.group(1) else ""
+ # Betfair GB title conventions: explicit jumps markers; otherwise Flat.
+ if re.search(r"\b(?:Hrd|Hurdle)\b",t,re.I): code="Hurdle"
+ elif re.search(r"\b(?:Chs|Chase)\b",t,re.I): code="Chase"
+ elif re.search(r"\b(?:NHF|INHF|Bumper)\b",t,re.I): code="NH Flat / Bumper"
+ else: code="Flat"
+ hand="Handicap" if re.search(r"\b(?:Hcap|Hcp|Handicap)\b",t,re.I) else "Non-handicap"
+ cat="Other"
+ for label,pat in [
+  ("Nursery",r"\bNursery\b"),("Maiden",r"\bMdn\b|\bMaiden\b"),
+  ("Novice",r"\bNov\b|\bNovice\b"),("Selling",r"\bSell\b|\bSelling\b"),
+  ("Claiming",r"\bClaim\b|\bClaiming\b"),("Conditions",r"\bCond\b|\bConditions?\b"),
+  ("Stakes",r"\bStks\b|\bStakes\b")]:
+  if re.search(pat,t,re.I): cat=label;break
+ grade=""
+ m=re.search(r"\b(?:Grp|Gp|Group)\s*([123])\b",t,re.I)
+ if m: grade="Group "+m.group(1)
+ else:
+  m=re.search(r"\b(?:Grade|Gd|Grd)\s*([123])\b",t,re.I)
+  if m: grade="Grade "+m.group(1)
+  elif re.search(r"\bListed\b",t,re.I): grade="Listed"
+ return code,dist,hand,cat,grade
 def parse(p):
  latest=None;mid=p.stem;ltp={}
  with op(p) as f:
@@ -44,13 +70,14 @@ def parse(p):
   if sid is None or bsp is None or not 1.01<=bsp<=1000:continue
   win=status=="WINNER";wins+=int(win);rr.append({"selection_id":int(sid),"horse":str(x.get("name") or f"Selection {sid}"),"bsp":bsp,"winner":win,"adjustment_factor":sf(x.get("adjustmentFactor")),"sort_priority":x.get("sortPriority"),"runner_status":status,"ltp":ltp.get(int(sid))})
  if len(rr)<2 or wins!=1:return None
- return {"market_id":mid,"market_time":str(latest.get("marketTime") or latest.get("openDate") or ""),"event_name":str(latest.get("eventName") or latest.get("name") or ""),"country":str(latest.get("countryCode") or "").upper(),"venue":str(latest.get("venue") or ""),"bet_delay":latest.get("betDelay"),"betting_type":str(latest.get("bettingType") or ""),"market_base_rate":sf(latest.get("marketBaseRate")),"number_of_winners":latest.get("numberOfWinners"),"in_play_enabled":latest.get("inPlay"),"cross_matching":latest.get("crossMatching"),"discount_allowed":latest.get("discountAllowed"),"persistence_enabled":latest.get("persistenceEnabled"),"runners":rr}
+ country=str(latest.get("countryCode") or "").upper(); race_name=str(latest.get("name") or ""); code,dist,hand,cat,grade=gb_parse(race_name,country)
+ return {"market_id":mid,"market_time":str(latest.get("marketTime") or latest.get("openDate") or ""),"event_name":str(latest.get("eventName") or race_name),"country":country,"venue":str(latest.get("venue") or ""),"race_code":code,"distance":dist,"handicap_status":hand,"race_category":cat,"race_grade":grade,"bet_delay":latest.get("betDelay"),"betting_type":str(latest.get("bettingType") or ""),"market_base_rate":sf(latest.get("marketBaseRate")),"number_of_winners":latest.get("numberOfWinners"),"in_play_enabled":latest.get("inPlay"),"cross_matching":latest.get("crossMatching"),"discount_allowed":latest.get("discountAllowed"),"persistence_enabled":latest.get("persistenceEnabled"),"runners":rr}
 def key(m,plan,src):
  try:d=datetime.fromisoformat(m["market_time"].replace("Z","+00:00"))
  except:d=datetime(1970,1,1,tzinfo=timezone.utc)
  return f"processed-enriched/horse-racing/win/{slug(plan)}/year={d.year:04d}/month={d.month:02d}/country={m['country'] or 'XX'}/{hashlib.sha256(src.encode()).hexdigest()[:24]}-{m['market_id'].replace('.','_')}.parquet"
 def write(m,p,plan,src):
- r=m["runners"];n=len(r);cols={"schema_version":[2]*n,"source_id":[hashlib.sha256(src.encode()).hexdigest()[:24]]*n,"plan":[plan]*n,"market_id":[m["market_id"]]*n,"market_time":[m["market_time"]]*n,"event_name":[m["event_name"]]*n,"country":[m["country"]]*n,"venue":[m["venue"]]*n,"runner_count":[n]*n,"bet_delay":[m["bet_delay"]]*n,"betting_type":[m["betting_type"]]*n,"market_base_rate":[m["market_base_rate"]]*n,"number_of_winners":[m["number_of_winners"]]*n,"in_play_enabled":[m["in_play_enabled"]]*n,"cross_matching":[m["cross_matching"]]*n,"discount_allowed":[m["discount_allowed"]]*n,"persistence_enabled":[m["persistence_enabled"]]*n}
+ r=m["runners"];n=len(r);cols={"schema_version":[2]*n,"source_id":[hashlib.sha256(src.encode()).hexdigest()[:24]]*n,"plan":[plan]*n,"market_id":[m["market_id"]]*n,"market_time":[m["market_time"]]*n,"event_name":[m["event_name"]]*n,"country":[m["country"]]*n,"venue":[m["venue"]]*n,"race_code":[m["race_code"]]*n,"distance":[m["distance"]]*n,"handicap_status":[m["handicap_status"]]*n,"race_category":[m["race_category"]]*n,"race_grade":[m["race_grade"]]*n,"runner_count":[n]*n,"bet_delay":[m["bet_delay"]]*n,"betting_type":[m["betting_type"]]*n,"market_base_rate":[m["market_base_rate"]]*n,"number_of_winners":[m["number_of_winners"]]*n,"in_play_enabled":[m["in_play_enabled"]]*n,"cross_matching":[m["cross_matching"]]*n,"discount_allowed":[m["discount_allowed"]]*n,"persistence_enabled":[m["persistence_enabled"]]*n}
  for k in ("selection_id","horse","bsp","winner","adjustment_factor","sort_priority","runner_status","ltp"):cols[k]=[x.get(k) for x in r]
  pq.write_table(pa.table(cols),p,compression="zstd")
 def main():
