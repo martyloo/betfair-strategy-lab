@@ -13,7 +13,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel,Field
 from starlette.middleware.sessions import SessionMiddleware
 
-ENGINE="public-web-v2.1"; ROOT=Path(os.getenv("BETFAIR_WEB_CACHE",Path.home()/".betfair-public-web-cache"));ROOT.mkdir(parents=True,exist_ok=True)
+ENGINE="public-web-v2.2"; ROOT=Path(os.getenv("BETFAIR_WEB_CACHE",Path.home()/".betfair-public-web-cache"));ROOT.mkdir(parents=True,exist_ok=True)
 WORKERS=max(1,int(os.getenv("BACKTEST_WORKERS","4"))); MAX_BETS=max(100,int(os.getenv("MAX_BETS_RETURNED","5000")))
 POOL=ThreadPoolExecutor(max_workers=WORKERS,thread_name_prefix="backtest"); LOCK=threading.Lock(); JOBS={}
 API_BASE="https://historicdata.betfair.com/api/"
@@ -258,7 +258,11 @@ def work(j,qd,h):
             n=f"{lo:g}–{hi:g}" if hi<1001 else f"{lo:g}+"
             if n in groups:
                 z=stats(groups[n]);bands.append({"band":n,"bets":z["bets"],"wins":z["wins"],"strike":z["strike"],"gross":z["gross"],"net":z["net"],"roi":z["stake_roi"]})
-        out={"engine_version":ENGINE,"cache_hash":h,"request":norm(q),"stats":s,"bands":bands,"bets":[asdict(x) for x in bets[:MAX_BETS]],"bets_truncated":len(bets)>MAX_BETS,"total_bets":len(bets),"markets_found":len(keys),"skipped":skip,"elapsed_seconds":round(time.time()-t,3)}
+        graph_points=[]; cumulative=0.0
+        for b in bets:
+            cumulative+=b.net
+            graph_points.append({"market_time":b.market_time,"event_name":b.event_name,"horse":b.horse,"bsp":round(b.bsp,4),"bet_type":b.bet_type,"bet_net":round(b.net,4),"cumulative":round(cumulative,4)})
+        out={"engine_version":ENGINE,"cache_hash":h,"request":norm(q),"stats":s,"bands":bands,"graph_points":graph_points,"bets":[asdict(x) for x in bets[:MAX_BETS]],"bets_truncated":len(bets)>MAX_BETS,"total_bets":len(bets),"markets_found":len(keys),"skipped":skip,"elapsed_seconds":round(time.time()-t,3)}
         r.putj(rk(h),out);upd(r,j,status="complete",progress=100,message="Backtest complete.",result_hash=h,cached=False,elapsed_seconds=out["elapsed_seconds"])
     except Exception as e:upd(r,j,status="failed",progress=100,message=str(e))
 
