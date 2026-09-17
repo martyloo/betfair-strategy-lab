@@ -13,7 +13,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel,Field
 from starlette.middleware.sessions import SessionMiddleware
 
-ENGINE="public-web-v2.2"; ROOT=Path(os.getenv("BETFAIR_WEB_CACHE",Path.home()/".betfair-public-web-cache"));ROOT.mkdir(parents=True,exist_ok=True)
+ENGINE="public-web-v3.0"; ROOT=Path(os.getenv("BETFAIR_WEB_CACHE",Path.home()/".betfair-public-web-cache"));ROOT.mkdir(parents=True,exist_ok=True)
 WORKERS=max(1,int(os.getenv("BACKTEST_WORKERS","4"))); MAX_BETS=max(100,int(os.getenv("MAX_BETS_RETURNED","5000")))
 POOL=ThreadPoolExecutor(max_workers=WORKERS,thread_name_prefix="backtest"); LOCK=threading.Lock(); JOBS={}
 API_BASE="https://historicdata.betfair.com/api/"
@@ -22,9 +22,15 @@ COUNTRIES=["GB","IE","US","AU","NZ","FR","DE","IT","ZA","AE","HK","SG","SE","NO"
 BANDS=[(1.01,2),(2,3),(3,5),(5,10),(10,20),(20,30),(30,50),(50,100),(100,200),(200,500),(500,1001)]
 
 @dataclass
-class Runner: selection_id:int; name:str; bsp:float; winner:bool
+class Runner:
+    selection_id:int; name:str; bsp:float; winner:bool
+    adjustment_factor:float|None=None; sort_priority:int|None=None; status:str=""; ltp:float|None=None
 @dataclass
-class Market: market_id:str; market_time:str; event_name:str; country:str; runners:list[Runner]
+class Market:
+    market_id:str; market_time:str; event_name:str; country:str; runners:list[Runner]
+    venue:str=""; bet_delay:int|None=None; betting_type:str=""; market_base_rate:float|None=None
+    number_of_winners:int|None=None; in_play_enabled:bool|None=None; cross_matching:bool|None=None
+    discount_allowed:bool|None=None; persistence_enabled:bool|None=None
 @dataclass
 class Bet:
     market_id:str;market_time:str;event_name:str;country:str;horse:str;bsp:float;bet_type:str;won:bool;stake:float;liability:float;gross:float;commission:float;net:float
@@ -43,6 +49,16 @@ class R2:
             r=self.s3.list_objects_v2(**kw);out += [x["Key"] for x in r.get("Contents",[]) if x["Key"].endswith(".parquet")]
             if not r.get("IsTruncated"):break
             token=r.get("NextContinuationToken")
+            if not token:break
+        return out
+    def list_any(self,prefix,suffix=".parquet"):
+        out=[];token=None
+        while True:
+            kw={"Bucket":self.bucket,"Prefix":prefix,"MaxKeys":1000}
+            if token:kw["ContinuationToken"]=token
+            z=self.s3.list_objects_v2(**kw);out += [x["Key"] for x in z.get("Contents",[]) if x["Key"].endswith(suffix)]
+            if not z.get("IsTruncated"):break
+            token=z.get("NextContinuationToken")
             if not token:break
         return out
     def getj(self,key):
@@ -170,6 +186,13 @@ class Req(BaseModel):
     from_date:date;to_date:date;countries:list[str]=Field(min_length=1);plan:str="Basic Plan";strategy:str="Lay longest outsider";nth:int=Field(2,ge=1,le=100)
     min_odds:float=Field(1.01,ge=1.01,le=1000);max_odds:float=Field(1000,ge=1.01,le=1000);min_runners:int=Field(2,ge=2);max_runners:int=Field(0,ge=0)
     stake_mode:str="Fixed stake";amount:float=Field(1.0,gt=0);commission:float=Field(2.0,ge=0,le=100)
+    venues:list[str]=[];days_of_week:list[int]=[];months_of_year:list[int]=[];time_from:str|None=None;time_to:str|None=None
+    fav_min_bsp:float|None=None;fav_max_bsp:float|None=None;second_min_bsp:float|None=None;second_max_bsp:float|None=None
+    fav_gap_min:float|None=None;fav_gap_max:float|None=None;overround_min:float|None=None;overround_max:float|None=None
+    number_of_winners:int|None=None;in_play_enabled:bool|None=None;bet_delay:int|None=None;betting_type:str|None=None
+    market_base_rate_min:float|None=None;market_base_rate_max:float|None=None;cross_matching:bool|None=None;discount_allowed:bool|None=None;persistence_enabled:bool|None=None
+    selected_ltp_min:float|None=None;selected_ltp_max:float|None=None;selected_adjustment_min:float|None=None;selected_adjustment_max:float|None=None
+    selected_sort_priority_min:int|None=None;selected_sort_priority_max:int|None=None
 
 def slug(s):return s.lower().replace(" ","-")
 def months(a,b):
@@ -184,11 +207,17 @@ def rk(h):return f"results/horse-racing/win/{ENGINE}/{h}.json"
 def jk(j):return f"jobs/horse-racing/win/{ENGINE}/{j}.json"
 def local(key):
     h=hashlib.sha256(key.encode()).hexdigest();return ROOT/"parquet"/h[:2]/f"{h}.parquet"
+def _col(d,name,default=None):
+    x=d.get(name);return x[0] if x else default
 def readm(path):
     d=pq.read_table(path).to_pydict()
     if not d.get("market_id"):return None
-    rs=[Runner(int(a),str(b),float(c),bool(w)) for a,b,c,w in zip(d["selection_id"],d["horse"],d["bsp"],d["winner"])]
-    return Market(str(d["market_id"][0]),str(d["market_time"][0]),str(d["event_name"][0]),str(d["country"][0]).upper(),rs)
+    rs=[]
+    for i in range(len(d["selection_id"])):
+        def at(name,default=None):
+            x=d.get(name);return x[i] if x and i<len(x) else default
+        rs.append(Runner(int(at("selection_id")),str(at("horse","")),float(at("bsp")),bool(at("winner",False)),safe_float(at("adjustment_factor")),int(at("sort_priority")) if at("sort_priority") is not None else None,str(at("runner_status","")),safe_float(at("ltp"))))
+    return Market(str(_col(d,"market_id","")),str(_col(d,"market_time","")),str(_col(d,"event_name","")),str(_col(d,"country","")).upper(),rs,str(_col(d,"venue","") or ""),_col(d,"bet_delay"),str(_col(d,"betting_type","") or ""),safe_float(_col(d,"market_base_rate")),_col(d,"number_of_winners"),_col(d,"in_play_enabled"),_col(d,"cross_matching"),_col(d,"discount_allowed"),_col(d,"persistence_enabled"))
 def mdate(m):
     try:return datetime.fromisoformat(m.market_time.replace("Z","+00:00")).date()
     except:return None
@@ -227,11 +256,44 @@ def upd(r,j,**c):
     try:r.putj(jk(j),x)
     except:pass
 def discover(r,q):
-    keys=set()
+    enriched=set();legacy=set()
     for y,m in months(q.from_date,q.to_date):
         for c in sorted(set(x.upper() for x in q.countries)):
-            keys.update(r.list(f"processed/horse-racing/win/{slug(q.plan)}/year={y:04d}/month={m:02d}/country={c}/"))
-    return sorted(keys)
+            enriched.update(r.list_any(f"processed-enriched/horse-racing/win/{slug(q.plan)}/year={y:04d}/month={m:02d}/country={c}/"))
+            legacy.update(r.list(f"processed/horse-racing/win/{slug(q.plan)}/year={y:04d}/month={m:02d}/country={c}/"))
+    return sorted(enriched) if enriched else sorted(legacy)
+def between(v,lo,hi):
+    if lo is None and hi is None:return True
+    if v is None:return False
+    return (lo is None or v>=lo) and (hi is None or v<=hi)
+def market_dt(m):
+    try:return datetime.fromisoformat(m.market_time.replace("Z","+00:00"))
+    except:return None
+def market_filters(m,q):
+    dt=market_dt(m)
+    if q.venues and m.venue.strip().lower() not in {x.strip().lower() for x in q.venues}:return False
+    if q.days_of_week and (not dt or dt.weekday() not in q.days_of_week):return False
+    if q.months_of_year and (not dt or dt.month not in q.months_of_year):return False
+    if dt and (q.time_from or q.time_to):
+        hhmm=dt.strftime("%H:%M")
+        if q.time_from and hhmm<q.time_from:return False
+        if q.time_to and hhmm>q.time_to:return False
+    a=sorted(m.runners,key=lambda x:x.bsp)
+    if len(a)<2:return False
+    fav,second=a[0],a[1];gap=second.bsp-fav.bsp;overround=sum(1/x.bsp for x in a)*100
+    if not between(fav.bsp,q.fav_min_bsp,q.fav_max_bsp) or not between(second.bsp,q.second_min_bsp,q.second_max_bsp):return False
+    if not between(gap,q.fav_gap_min,q.fav_gap_max) or not between(overround,q.overround_min,q.overround_max):return False
+    if q.number_of_winners is not None and m.number_of_winners!=q.number_of_winners:return False
+    if q.in_play_enabled is not None and m.in_play_enabled!=q.in_play_enabled:return False
+    if q.bet_delay is not None and m.bet_delay!=q.bet_delay:return False
+    if q.betting_type and m.betting_type.upper()!=q.betting_type.upper():return False
+    if not between(m.market_base_rate,q.market_base_rate_min,q.market_base_rate_max):return False
+    if q.cross_matching is not None and m.cross_matching!=q.cross_matching:return False
+    if q.discount_allowed is not None and m.discount_allowed!=q.discount_allowed:return False
+    if q.persistence_enabled is not None and m.persistence_enabled!=q.persistence_enabled:return False
+    return True
+def runner_filters(r,q):
+    return between(r.ltp,q.selected_ltp_min,q.selected_ltp_max) and between(r.adjustment_factor,q.selected_adjustment_min,q.selected_adjustment_max) and between(r.sort_priority,q.selected_sort_priority_min,q.selected_sort_priority_max)
 def work(j,qd,h):
     r=R2();q=Req(**qd);t=time.time()
     try:
@@ -247,8 +309,9 @@ def work(j,qd,h):
                 if not m or not d or not(q.from_date<=d<=q.to_date) or m.country not in cs:continue
                 n=len(m.runners)
                 if n<q.min_runners or(q.max_runners and n>q.max_runners):continue
+                if not market_filters(m,q):continue
                 rr=pick(m,q.strategy,q.nth)
-                if rr and q.min_odds<=rr.bsp<=q.max_odds:bets.append(settle(m,rr,q))
+                if rr and runner_filters(rr,q) and q.min_odds<=rr.bsp<=q.max_odds:bets.append(settle(m,rr,q))
             except:skip+=1
             if i%max(1,len(keys)//20)==0:upd(r,j,status="running",progress=min(95,5+int(i/len(keys)*90)),message=f"Processed {i:,} of {len(keys):,} markets…")
         bets.sort(key=lambda x:x.market_time);s=stats(bets);groups={}
