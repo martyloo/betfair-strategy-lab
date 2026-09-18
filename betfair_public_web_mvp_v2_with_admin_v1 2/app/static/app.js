@@ -19,7 +19,7 @@ document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{document.querySelect
 const optNum=id=>v(id)===''?null:+v(id),optBool=id=>v(id)===''?null:v(id)==='true';
 function body(){return{from_date:v('from'),to_date:v('to'),countries:cs(),plan:v('plan'),strategy:v('strategy'),nth:+v('nth'),min_odds:+v('minOdds'),max_odds:+v('maxOdds'),min_runners:+v('minRunners'),max_runners:+v('maxRunners'),stake_mode:v('stakeMode'),amount:+v('amount'),commission:+v('commission'),venues:selected('venues'),race_codes:selected('raceCode'),distances:selected('distance'),handicap_status:v('handicap')||null,race_categories:selected('raceCategory'),race_grades:selected('raceGrade'),days_of_week:[...document.querySelectorAll('#days input:checked')].map(x=>+x.value),months_of_year:[...document.querySelectorAll('#months input:checked')].map(x=>+x.value),time_from:v('timeFrom')||null,time_to:v('timeTo')||null,fav_min_bsp:optNum('favMin'),fav_max_bsp:optNum('favMax'),second_min_bsp:optNum('secondMin'),second_max_bsp:optNum('secondMax'),fav_gap_min:optNum('gapMin'),fav_gap_max:optNum('gapMax'),overround_min:optNum('overMin'),overround_max:optNum('overMax'),number_of_winners:optNum('numWinners'),in_play_enabled:optBool('inPlay'),bet_delay:optNum('betDelay'),betting_type:v('bettingType')||null,market_base_rate_min:optNum('baseMin'),market_base_rate_max:optNum('baseMax'),cross_matching:optBool('crossMatching'),discount_allowed:optBool('discountAllowed'),persistence_enabled:optBool('persistenceEnabled'),selected_ltp_min:optNum('ltpMin'),selected_ltp_max:optNum('ltpMax'),selected_adjustment_min:optNum('adjMin'),selected_adjustment_max:optNum('adjMax'),selected_sort_priority_min:optNum('sortMin'),selected_sort_priority_max:optNum('sortMax')}}
 $('run').onclick=async()=>{if(!cs().length)return alert('Select at least one country.');try{$('run').disabled=true;$('cached').classList.add('hide');$('job').classList.remove('hide');$('jobmsg').textContent='Submitting backtest…';let j=await jf('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body())});$('jobid').textContent='Job '+j.job_id;poll(j.job_id)}catch(e){fail(e.message)}};
-async function poll(id){clearTimeout(timer);try{let j=await jf('/api/jobs/'+id);$('jobmsg').textContent=j.message||j.status;$('pct').textContent=(j.progress||0)+'%';$('bar').style.width=(j.progress||0)+'%';if(j.status==='complete'){render(await jf('/api/jobs/'+id+'/result'),j);$('run').disabled=false;return}if(j.status==='failed'){fail(j.message);return}timer=setTimeout(()=>poll(id),900)}catch(e){fail(e.message)}}
+async function poll(id){clearTimeout(timer);try{let j=await jf('/api/jobs/'+id);$('jobmsg').textContent=j.message||j.status;$('pct').textContent=(j.progress||0)+'%';$('bar').style.width=(j.progress||0)+'%';if(j.status==='complete'){render(await jf('/api/jobs/'+id+'/result'),j);$('run').disabled=false;loadHistory();return}if(j.status==='failed'){fail(j.message);return}timer=setTimeout(()=>poll(id),900)}catch(e){fail(e.message)}}
 function fail(m){$('jobmsg').innerHTML='<span class="error">'+esc(m)+'</span>';$('title').textContent='Backtest could not complete';$('sub').textContent=m;$('run').disabled=false}
 const money=x=>'£'+Number(x||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}),esc=s=>String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
 function render(r,j){let s=r.stats;$('title').textContent='Backtest complete';$('sub').textContent=`${r.request.from_date} → ${r.request.to_date} · ${r.request.countries.join(', ')} · ${r.request.strategy}`;$('cached').classList.toggle('hide',!j.cached);$('betsM').textContent=s.bets.toLocaleString();$('strikeM').textContent=s.strike.toFixed(2)+'%';$('netM').textContent=money(s.net);$('roiM').textContent=s.stake_roi.toFixed(2)+'%';$('ddM').textContent=money(s.max_drawdown);$('bspM').textContent=s.avg_bsp.toFixed(2);$('bandrows').innerHTML=r.bands.map(x=>`<tr><td>${x.band}</td><td>${x.bets}</td><td>${x.wins}</td><td>${x.strike.toFixed(2)}%</td><td>${money(x.gross)}</td><td>${money(x.net)}</td><td>${x.roi.toFixed(2)}%</td></tr>`).join('');$('betrows').innerHTML=r.bets.map(x=>`<tr><td>${esc(x.market_time)}</td><td>${esc(x.country)}</td><td>${esc(x.event_name)}</td><td>${esc(x.horse)}</td><td>${x.bsp.toFixed(2)}</td><td>${x.bet_type}</td><td>${x.won?'WIN':'LOSS'}</td><td>${money(x.net)}</td></tr>`).join('');$('trunc').textContent=r.bets_truncated?`Showing first ${r.bets.length.toLocaleString()} of ${r.total_bets.toLocaleString()} bets.`:'';$('detailgrid').innerHTML=[['Job ID',j.job_id],['Result cache',j.cached?'Persistent cache hit':'New calculation'],['Markets found',r.markets_found],['Markets skipped',r.skipped],['Elapsed',r.elapsed_seconds+' sec'],['Engine',r.engine_version]].map(x=>`<div><span>${x[0]}</span><b>${esc(x[1])}</b></div>`).join('');draw(r.graph_points||[],s.equity)}
@@ -56,27 +56,35 @@ function chartHover(ev){
 $('chart').addEventListener('mousemove',chartHover);$('chart').addEventListener('mouseleave',()=>{let t=$('charttip');if(t)t.style.display='none'});
 window.addEventListener('resize',()=>{if(chartState.points.length)draw(chartState.points)});
 
-async function loadFilterOptions(){
- const fallbackDistances=["5f","6f","7f","1m","1m1f","1m2f","1m3f","1m4f","1m5f","1m6f","1m7f","2m","2m1f","2m2f","2m3f","2m4f","2m5f","2m6f","2m7f","3m","3m1f","3m2f","3m3f","3m4f","3m5f","3m6f"];
- const fallbackVenues=["Aintree","Ascot","Ayr","Bangor-on-Dee","Bath","Beverley","Brighton","Carlisle","Cartmel","Catterick","Chelmsford City","Cheltenham","Chepstow","Chester","Doncaster","Epsom Downs","Exeter","Fakenham","Ffos Las","Fontwell","Goodwood","Hamilton","Haydock","Hereford","Hexham","Huntingdon","Kempton","Leicester","Lingfield","Ludlow","Market Rasen","Musselburgh","Newbury","Newcastle","Newmarket","Newton Abbot","Nottingham","Perth","Plumpton","Pontefract","Redcar","Ripon","Salisbury","Sandown","Sedgefield","Southwell","Stratford","Taunton","Thirsk","Uttoxeter","Warwick","Wetherby","Wincanton","Windsor","Wolverhampton","Worcester","Yarmouth","York"];
- let venues=fallbackVenues, distances=fallbackDistances;
- try{
-  let country=(cs()[0]||'GB'),plan=v('plan');
-  let r=await fetch(`/api/filter-options?plan=${encodeURIComponent(plan)}&country=${encodeURIComponent(country)}`);
-  if(r.ok){
-   let x=await r.json();
-   venues=[...new Set([...fallbackVenues,...(x.venues||[])])].sort();
-   distances=[...new Set([...fallbackDistances,...(x.distances||[])])];
-  }
- }catch(e){console.warn('Using built-in GB filter options',e);}
- setMultiOptions('venues',venues);setMultiOptions('distance',distances);
- ['raceCode','raceCategory','raceGrade'].forEach(id=>{
-   $(id).querySelectorAll('.multi-options input').forEach(x=>x.addEventListener('change',()=>updateMultiSummary(id)));
+
+function initMultiDropdowns(){
+ ['venues','distance','raceCode','raceCategory','raceGrade'].forEach(id=>{
+   const el=$(id); if(!el)return;
+   el.querySelectorAll('.multi-options input').forEach(x=>x.addEventListener('change',()=>updateMultiSummary(id)));
+   const clear=el.querySelector('.clear-multi');
+   if(clear)clear.onclick=e=>{e.preventDefault();el.querySelectorAll('.multi-options input').forEach(x=>x.checked=false);updateMultiSummary(id)};
    updateMultiSummary(id);
  });
- document.querySelectorAll('.clear-multi').forEach(b=>b.onclick=e=>{
-   const d=e.target.closest('.multi-dropdown');d.querySelectorAll('input').forEach(x=>x.checked=false);updateMultiSummary(d.id);
- });
 }
-document.addEventListener('DOMContentLoaded',loadFilterOptions);
-$('plan').addEventListener('change',loadFilterOptions);
+async function loadHistory(){
+ const tbody=$('historyRows'); if(!tbody)return;
+ try{
+  const x=await jf('/api/public-runs?limit=250');
+  if(!x.runs.length){tbody.innerHTML='<tr><td colspan="7">No completed backtests saved yet.</td></tr>';return}
+  tbody.innerHTML=x.runs.map(r=>`<tr class="history-run" data-run="${esc(r.run_id)}">
+   <td><b>${Number(r.roi||0).toFixed(2)}%</b></td><td>${money(r.net)}</td><td>${Number(r.bets||0).toLocaleString()}</td>
+   <td>${esc(r.strategy||'')}</td><td>${esc(r.from_date||'')} → ${esc(r.to_date||'')}</td>
+   <td>${esc((r.countries||[]).join(', '))}</td><td>${esc((r.created_at||'').replace('T',' ').slice(0,16))}</td></tr>`).join('');
+  tbody.querySelectorAll('.history-run').forEach(tr=>tr.onclick=()=>loadSavedRun(tr.dataset.run));
+ }catch(e){tbody.innerHTML=`<tr><td colspan="7" class="error">${esc(e.message)}</td></tr>`}
+}
+async function loadSavedRun(runId){
+ try{
+  const x=await jf('/api/public-runs/'+encodeURIComponent(runId)+'/result');
+  const run=x.run,result=x.result;
+  render(result,{job_id:run.job_id||run.run_id,cached:!!run.cached});
+  window.scrollTo({top:0,behavior:'smooth'});
+ }catch(e){alert(e.message)}
+}
+document.addEventListener('DOMContentLoaded',()=>{initMultiDropdowns();loadHistory()});
+$('refreshHistory').addEventListener('click',loadHistory);
