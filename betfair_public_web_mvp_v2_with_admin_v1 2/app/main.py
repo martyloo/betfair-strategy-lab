@@ -1,5 +1,5 @@
 from __future__ import annotations
-import bz2,hashlib,hmac,json,math,os,secrets,threading,time,uuid
+import bz2,hashlib,hmac,json,math,os,re,secrets,threading,time,uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass,asdict
 from datetime import date,datetime,timezone,timedelta
@@ -13,7 +13,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel,Field
 from starlette.middleware.sessions import SessionMiddleware
 
-ENGINE="public-web-v3.3-gb-checkbox"; ROOT=Path(os.getenv("BETFAIR_WEB_CACHE",Path.home()/".betfair-public-web-cache"));ROOT.mkdir(parents=True,exist_ok=True)
+ENGINE="public-web-v3.4-csv-history"; ROOT=Path(os.getenv("BETFAIR_WEB_CACHE",Path.home()/".betfair-public-web-cache"));ROOT.mkdir(parents=True,exist_ok=True)
 WORKERS=max(1,int(os.getenv("BACKTEST_WORKERS","4"))); MAX_BETS=max(100,int(os.getenv("MAX_BETS_RETURNED","5000")))
 POOL=ThreadPoolExecutor(max_workers=WORKERS,thread_name_prefix="backtest"); LOCK=threading.Lock(); JOBS={}
 API_BASE="https://historicdata.betfair.com/api/"
@@ -208,6 +208,10 @@ def norm(q):
 def hsh(q):return hashlib.sha256(json.dumps(norm(q),sort_keys=True,separators=(",",":")).encode()).hexdigest()
 def rk(h):return f"results/horse-racing/win/{ENGINE}/{h}.json"
 def jk(j):return f"jobs/horse-racing/win/{ENGINE}/{j}.json"
+def run_key(run_id):return f"public-runs/horse-racing/win/{run_id}.json"
+def save_run(r,run_id,**changes):
+    old=r.getj(run_key(run_id)) or {"run_id":run_id,"created_at":datetime.now(timezone.utc).isoformat()}
+    old.update(changes);old["updated_at"]=datetime.now(timezone.utc).isoformat();r.putj(run_key(run_id),old);return old
 def local(key):
     h=hashlib.sha256(key.encode()).hexdigest();return ROOT/"parquet"/h[:2]/f"{h}.parquet"
 def _col(d,name,default=None):
@@ -303,7 +307,7 @@ def market_filters(m,q):
     return True
 def runner_filters(r,q):
     return between(r.ltp,q.selected_ltp_min,q.selected_ltp_max) and between(r.adjustment_factor,q.selected_adjustment_min,q.selected_adjustment_max) and between(r.sort_priority,q.selected_sort_priority_min,q.selected_sort_priority_max)
-def work(j,qd,h):
+def work(j,qd,h,run_id):
     r=R2();q=Req(**qd);t=time.time()
     try:
         upd(r,j,status="running",progress=2,message="Finding processed Parquet partitions in R2…");keys=discover(r,q)
@@ -335,8 +339,16 @@ def work(j,qd,h):
             cumulative+=b.net
             graph_points.append({"market_time":b.market_time,"event_name":b.event_name,"horse":b.horse,"bsp":round(b.bsp,4),"bet_type":b.bet_type,"bet_net":round(b.net,4),"cumulative":round(cumulative,4)})
         out={"engine_version":ENGINE,"cache_hash":h,"request":norm(q),"stats":s,"bands":bands,"graph_points":graph_points,"bets":[asdict(x) for x in bets[:MAX_BETS]],"bets_truncated":len(bets)>MAX_BETS,"total_bets":len(bets),"markets_found":len(keys),"skipped":skip,"elapsed_seconds":round(time.time()-t,3)}
-        r.putj(rk(h),out);upd(r,j,status="complete",progress=100,message="Backtest complete.",result_hash=h,cached=False,elapsed_seconds=out["elapsed_seconds"])
-    except Exception as e:upd(r,j,status="failed",progress=100,message=str(e))
+        r.putj(rk(h),out)
+        save_run(r,run_id,status="complete",job_id=j,result_hash=h,engine_version=ENGINE,request=out["request"],
+                 roi=round(s["stake_roi"],6),net=round(s["net"],6),bets=s["bets"],strike=round(s["strike"],6),
+                 strategy=q.strategy,from_date=str(q.from_date),to_date=str(q.to_date),countries=q.countries,cached=False,
+                 elapsed_seconds=out["elapsed_seconds"])
+        upd(r,j,status="complete",progress=100,message="Backtest complete.",result_hash=h,run_id=run_id,cached=False,elapsed_seconds=out["elapsed_seconds"])
+    except Exception as e:
+        try: save_run(r,run_id,status="failed",job_id=j,result_hash=h,error=str(e))
+        except: pass
+        upd(r,j,status="failed",progress=100,message=str(e))
 
 app=FastAPI(title="Betfair Strategy Lab");app.add_middleware(SessionMiddleware,secret_key=os.getenv("ADMIN_SESSION_SECRET",secrets.token_hex(32)),same_site="lax",https_only=os.getenv("COOKIE_SECURE","0")=="1");BASE=Path(__file__).parent
 app.mount("/static",StaticFiles(directory=BASE/"static"),name="static");templates=Jinja2Templates(directory=BASE/"templates")
@@ -378,9 +390,21 @@ def health():
 def create(q:Req):
     if q.from_date>q.to_date:raise HTTPException(400,"From date must be before To date.")
     if q.min_odds>q.max_odds:raise HTTPException(400,"Minimum BSP cannot exceed maximum BSP.")
-    q.countries=sorted(set(x.upper().strip() for x in q.countries if x.strip()));r=R2();h=hsh(q);cached=r.getj(rk(h));j=uuid.uuid4().hex
-    if cached:upd(r,j,status="complete",progress=100,message="Loaded from persistent result cache.",result_hash=h,cached=True,elapsed_seconds=0);return {"job_id":j,"status":"complete","cached":True}
-    upd(r,j,status="queued",progress=0,message="Backtest queued.",result_hash=h,cached=False);POOL.submit(work,j,q.model_dump(mode="json"),h);return {"job_id":j,"status":"queued","cached":False}
+    q.countries=sorted(set(x.upper().strip() for x in q.countries if x.strip()))
+    r=R2();h=hsh(q);cached=r.getj(rk(h));j=uuid.uuid4().hex;run_id=uuid.uuid4().hex
+    base=dict(status="queued",job_id=j,result_hash=h,engine_version=ENGINE,request=norm(q),strategy=q.strategy,
+              from_date=str(q.from_date),to_date=str(q.to_date),countries=q.countries)
+    if cached:
+        st=cached.get("stats",{})
+        save_run(r,run_id,**base,status="complete",roi=round(float(st.get("stake_roi",0)),6),
+                 net=round(float(st.get("net",0)),6),bets=int(st.get("bets",0)),strike=round(float(st.get("strike",0)),6),cached=True)
+        upd(r,j,status="complete",progress=100,message="Loaded from persistent result cache.",result_hash=h,run_id=run_id,cached=True,elapsed_seconds=0)
+        return {"job_id":j,"run_id":run_id,"status":"complete","cached":True}
+    save_run(r,run_id,**base,cached=False)
+    upd(r,j,status="queued",progress=0,message="Backtest queued.",result_hash=h,run_id=run_id,cached=False)
+    POOL.submit(work,j,q.model_dump(mode="json"),h,run_id)
+    return {"job_id":j,"run_id":run_id,"status":"queued","cached":False}
+
 @app.get("/api/jobs/{j}")
 def job(j:str):
     with LOCK:x=JOBS.get(j)
@@ -398,6 +422,26 @@ def result(j:str):
     z=r.getj(rk(x["result_hash"]))
     if not z:raise HTTPException(404,"Result cache entry not found.")
     return z
+
+@app.get("/api/public-runs")
+def public_runs(limit:int=200):
+    r=R2();keys=r.list_any("public-runs/horse-racing/win/",suffix=".json");rows=[]
+    for k in keys:
+        try:
+            x=r.getj(k)
+            if x and x.get("status")=="complete": rows.append(x)
+        except: pass
+    rows.sort(key=lambda x:(float(x.get("roi",0)),x.get("created_at","")),reverse=True)
+    return {"runs":rows[:max(1,min(limit,1000))],"total":len(rows)}
+
+@app.get("/api/public-runs/{run_id}/result")
+def public_run_result(run_id:str):
+    r=R2();x=r.getj(run_key(run_id))
+    if not x:raise HTTPException(404,"Saved run not found.")
+    if x.get("status")!="complete":raise HTTPException(409,"Saved run is not complete.")
+    z=r.getj(rk(x.get("result_hash","")))
+    if not z:raise HTTPException(404,"Saved result data not found.")
+    return {"run":x,"result":z}
 
 @app.get("/admin",response_class=HTMLResponse)
 def admin_page(request:Request):
