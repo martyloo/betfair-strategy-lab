@@ -6,24 +6,27 @@
 <section><h3>Strategy</h3><label>Selection rule<select id="strategy"><option>Lay longest outsider</option><option>Back longest outsider</option><option>Lay favourite</option><option>Back favourite</option><option>Lay Nth favourite</option><option>Back Nth favourite</option></select></label><label>Nth favourite<input id="nth" type="number" value="2" min="1"></label><div class="two"><label>Min BSP<input id="minOdds" type="number" value="1.01" step=".01"></label><label>Max BSP<input id="maxOdds" type="number" value="1000" step=".01"></label></div><div class="two"><label>Min runners<input id="minRunners" type="number" value="2"></label><label>Max runners<input id="maxRunners" type="number" value="0"></label></div></section>
 <section><details class="advanced"><summary><b>Advanced race filters</b><span>Optional · blank = all races</span></summary><div class="advancedbody">
 <label>Venue
-<select id="venues" multiple size="8" class="multi-filter" aria-label="Venues"></select>
-<small>Leave unselected for any venue. Select multiple with Ctrl/Cmd-click.</small>
-</label>
+<details class="multi-dropdown" id="venues"><summary>Any venue</summary>
+<div class="multi-menu"><button type="button" class="clear-multi">Clear all</button><div class="multi-options"></div></div>
+</details></label>
 <h4>GB race details</h4>
 <div class="two"><label>Race code
-<select id="raceCode" multiple size="4" class="multi-filter"><option>Flat</option><option>Hurdle</option><option>Chase</option><option>NH Flat / Bumper</option></select>
-<small>Leave unselected for any race code.</small></label>
+<details class="multi-dropdown" id="raceCode"><summary>Any race code</summary>
+<div class="multi-menu"><button type="button" class="clear-multi">Clear all</button><div class="multi-options"><label class="check-option"><input type="checkbox" value="Flat"> Flat</label><label class="check-option"><input type="checkbox" value="Hurdle"> Hurdle</label><label class="check-option"><input type="checkbox" value="Chase"> Chase</label><label class="check-option"><input type="checkbox" value="NH Flat / Bumper"> NH Flat / Bumper</label></div></div>
+</details></label>
 <label>Distance
-<select id="distance" multiple size="8" class="multi-filter" aria-label="Distances"></select>
-<small>Leave unselected for any distance. Select multiple with Ctrl/Cmd-click.</small>
-</label></div>
+<details class="multi-dropdown" id="distance"><summary>Any distance</summary>
+<div class="multi-menu"><button type="button" class="clear-multi">Clear all</button><div class="multi-options"></div></div>
+</details></label></div>
 <div class="two"><label>Handicap<select id="handicap"><option value="">Any</option><option>Handicap</option><option>Non-handicap</option></select></label>
 <label>Race category
-<select id="raceCategory" multiple size="8" class="multi-filter"><option>Maiden</option><option>Novice</option><option>Nursery</option><option>Stakes</option><option>Conditions</option><option>Selling</option><option>Claiming</option><option>Other</option></select>
-<small>Leave unselected for any category.</small></label></div>
+<details class="multi-dropdown" id="raceCategory"><summary>Any race category</summary>
+<div class="multi-menu"><button type="button" class="clear-multi">Clear all</button><div class="multi-options"><label class="check-option"><input type="checkbox" value="Maiden"> Maiden</label><label class="check-option"><input type="checkbox" value="Novice"> Novice</label><label class="check-option"><input type="checkbox" value="Nursery"> Nursery</label><label class="check-option"><input type="checkbox" value="Stakes"> Stakes</label><label class="check-option"><input type="checkbox" value="Conditions"> Conditions</label><label class="check-option"><input type="checkbox" value="Selling"> Selling</label><label class="check-option"><input type="checkbox" value="Claiming"> Claiming</label><label class="check-option"><input type="checkbox" value="Other"> Other</label></div></div>
+</details></label></div>
 <label>Race grade
-<select id="raceGrade" multiple size="7" class="multi-filter"><option>Group 1</option><option>Group 2</option><option>Group 3</option><option>Grade 1</option><option>Grade 2</option><option>Grade 3</option><option>Listed</option></select>
-<small>Leave unselected for any grade.</small></label><div class="two"><label>Race time from<input id="timeFrom" type="time"></label><label>Race time to<input id="timeTo" type="time"></label></div>
+<details class="multi-dropdown" id="raceGrade"><summary>Any race grade</summary>
+<div class="multi-menu"><button type="button" class="clear-multi">Clear all</button><div class="multi-options"><label class="check-option"><input type="checkbox" value="Group 1"> Group 1</label><label class="check-option"><input type="checkbox" value="Group 2"> Group 2</label><label class="check-option"><input type="checkbox" value="Group 3"> Group 3</label><label class="check-option"><input type="checkbox" value="Grade 1"> Grade 1</label><label class="check-option"><input type="checkbox" value="Grade 2"> Grade 2</label><label class="check-option"><input type="checkbox" value="Grade 3"> Grade 3</label><label class="check-option"><input type="checkbox" value="Listed"> Listed</label></div></div>
+</details></label><div class="two"><label>Race time from<input id="timeFrom" type="time"></label><label>Race time to<input id="timeTo" type="time"></label></div>
 <label>Days of week<div class="checks" id="days"><label><input type="checkbox" value="0">Mon</label><label><input type="checkbox" value="1">Tue</label><label><input type="checkbox" value="2">Wed</label><label><input type="checkbox" value="3">Thu</label><label><input type="checkbox" value="4">Fri</label><label><input type="checkbox" value="5">Sat</label><label><input type="checkbox" value="6">Sun</label></div></label>
 <label>Months<div class="checks" id="months">{% for m in range(1,13) %}<label><input type="checkbox" value="{{m}}">{{m}}</label>{% endfor %}</div></label>
 <h4>Market prices</h4><div class="two"><label>Favourite BSP min<input id="favMin" type="number" step=".01" placeholder="Any"></label><label>Favourite BSP max<input id="favMax" type="number" step=".01" placeholder="Any"></label></div>
