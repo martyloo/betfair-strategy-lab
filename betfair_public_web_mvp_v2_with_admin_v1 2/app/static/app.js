@@ -1,4 +1,16 @@
 const $=x=>document.getElementById(x),v=x=>$(x).value;let timer;
+const selected=id=>[...document.querySelectorAll(`#${id} .multi-options input:checked`)].map(x=>x.value);
+function updateMultiSummary(id){
+ const el=$(id), vals=selected(id), sum=el.querySelector('summary');
+ const label=id==='venues'?'venue':id==='distance'?'distance':id==='raceCode'?'race code':id==='raceCategory'?'category':'grade';
+ sum.textContent=vals.length===0?`Any ${label}`:vals.length<=2?vals.join(', '):`${vals.length} selected`;
+}
+function setMultiOptions(id,items){
+ const el=$(id), keep=new Set(selected(id)), box=el.querySelector('.multi-options');
+ box.innerHTML=items.map(z=>`<label class="check-option"><input type="checkbox" value="${esc(z)}"${keep.has(z)?' checked':''}> ${esc(z)}</label>`).join('');
+ box.querySelectorAll('input').forEach(x=>x.addEventListener('change',()=>updateMultiSummary(id)));
+ updateMultiSummary(id);
+}
 const cs=()=>[...document.querySelectorAll('.countries input:checked')].map(x=>x.value);
 let t=new Date(),f=new Date();f.setMonth(f.getMonth()-1);$('to').value=t.toISOString().slice(0,10);$('from').value=f.toISOString().slice(0,10);
 async function jf(url,opt={}){let r=await fetch(url,opt),txt=await r.text(),j;try{j=JSON.parse(txt)}catch{throw Error(txt||`HTTP ${r.status}`)}if(!r.ok)throw Error(j.detail||j.error||`HTTP ${r.status}`);return j}
@@ -45,16 +57,26 @@ $('chart').addEventListener('mousemove',chartHover);$('chart').addEventListener(
 window.addEventListener('resize',()=>{if(chartState.points.length)draw(chartState.points)});
 
 async function loadFilterOptions(){
+ const fallbackDistances=["5f","6f","7f","1m","1m1f","1m2f","1m3f","1m4f","1m5f","1m6f","1m7f","2m","2m1f","2m2f","2m3f","2m4f","2m5f","2m6f","2m7f","3m","3m1f","3m2f","3m3f","3m4f","3m5f","3m6f"];
+ const fallbackVenues=["Aintree","Ascot","Ayr","Bangor-on-Dee","Bath","Beverley","Brighton","Carlisle","Cartmel","Catterick","Chelmsford City","Cheltenham","Chepstow","Chester","Doncaster","Epsom Downs","Exeter","Fakenham","Ffos Las","Fontwell","Goodwood","Hamilton","Haydock","Hereford","Hexham","Huntingdon","Kempton","Leicester","Lingfield","Ludlow","Market Rasen","Musselburgh","Newbury","Newcastle","Newmarket","Newton Abbot","Nottingham","Perth","Plumpton","Pontefract","Redcar","Ripon","Salisbury","Sandown","Sedgefield","Southwell","Stratford","Taunton","Thirsk","Uttoxeter","Warwick","Wetherby","Wincanton","Windsor","Wolverhampton","Worcester","Yarmouth","York"];
+ let venues=fallbackVenues, distances=fallbackDistances;
  try{
   let country=(cs()[0]||'GB'),plan=v('plan');
   let r=await fetch(`/api/filter-options?plan=${encodeURIComponent(plan)}&country=${encodeURIComponent(country)}`);
-  if(!r.ok)return;
-  let x=await r.json();
-  for(const [id,items] of [['venues',x.venues||[]],['distance',x.distances||[]]]){
-    let el=$(id), keep=new Set(selected(id));
-    el.innerHTML=items.map(z=>`<option value="${esc(z)}"${keep.has(z)?' selected':''}>${esc(z)}</option>`).join('');
+  if(r.ok){
+   let x=await r.json();
+   venues=[...new Set([...fallbackVenues,...(x.venues||[])])].sort();
+   distances=[...new Set([...fallbackDistances,...(x.distances||[])])];
   }
- }catch(e){console.warn('Could not load filter options',e);}
+ }catch(e){console.warn('Using built-in GB filter options',e);}
+ setMultiOptions('venues',venues);setMultiOptions('distance',distances);
+ ['raceCode','raceCategory','raceGrade'].forEach(id=>{
+   $(id).querySelectorAll('.multi-options input').forEach(x=>x.addEventListener('change',()=>updateMultiSummary(id)));
+   updateMultiSummary(id);
+ });
+ document.querySelectorAll('.clear-multi').forEach(b=>b.onclick=e=>{
+   const d=e.target.closest('.multi-dropdown');d.querySelectorAll('input').forEach(x=>x.checked=false);updateMultiSummary(d.id);
+ });
 }
 document.addEventListener('DOMContentLoaded',loadFilterOptions);
 $('plan').addEventListener('change',loadFilterOptions);
