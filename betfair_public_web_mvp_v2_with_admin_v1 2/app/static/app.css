@@ -2,3 +2,14 @@
 .multi-filter{min-height:9.5rem;width:100%;padding:.35rem}
 .multi-filter option{padding:.28rem .4rem}
 label small{display:block;margin-top:.3rem;opacity:.72;font-size:.78rem;line-height:1.25}
+
+.multi-dropdown{position:relative;width:100%}
+.multi-dropdown summary{cursor:pointer;list-style:none;border:1px solid #d5d9df;border-radius:8px;padding:.7rem .8rem;background:#fff;min-height:1.2rem}
+.multi-dropdown summary::-webkit-details-marker{display:none}
+.multi-dropdown summary:after{content:"▾";float:right}
+.multi-dropdown[open] summary:after{content:"▴"}
+.multi-menu{position:absolute;z-index:50;left:0;right:0;top:calc(100% + 4px);max-height:280px;overflow:auto;background:#fff;border:1px solid #d5d9df;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.14);padding:.45rem}
+.check-option{display:flex!important;align-items:center;gap:.45rem;padding:.45rem .5rem;margin:0!important;cursor:pointer;border-radius:5px}
+.check-option:hover{background:rgba(0,0,0,.05)}
+.check-option input{width:auto!important;margin:0!important}
+.clear-multi{width:100%;margin-bottom:.35rem;padding:.4rem;border:0;border-radius:5px;cursor:pointer}
