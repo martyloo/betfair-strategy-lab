@@ -13,7 +13,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel,Field
 from starlette.middleware.sessions import SessionMiddleware
 
-ENGINE="public-web-v3.4-csv-history"; ROOT=Path(os.getenv("BETFAIR_WEB_CACHE",Path.home()/".betfair-public-web-cache"));ROOT.mkdir(parents=True,exist_ok=True)
+ENGINE="public-web-v3.5-race-filter-fix"; ROOT=Path(os.getenv("BETFAIR_WEB_CACHE",Path.home()/".betfair-public-web-cache"));ROOT.mkdir(parents=True,exist_ok=True)
 WORKERS=max(1,int(os.getenv("BACKTEST_WORKERS","4"))); MAX_BETS=max(100,int(os.getenv("MAX_BETS_RETURNED","5000")))
 POOL=ThreadPoolExecutor(max_workers=WORKERS,thread_name_prefix="backtest"); LOCK=threading.Lock(); JOBS={}
 API_BASE="https://historicdata.betfair.com/api/"
@@ -226,6 +226,57 @@ def readm(path):
         rs.append(Runner(int(at("selection_id")),str(at("horse","")),float(at("bsp")),bool(at("winner",False)),safe_float(at("adjustment_factor")),int(at("sort_priority")) if at("sort_priority") is not None else None,str(at("runner_status","")),safe_float(at("ltp"))))
     return Market(str(_col(d,"market_id","")),str(_col(d,"market_time","")),str(_col(d,"event_name","")),str(_col(d,"country","")).upper(),rs,str(_col(d,"venue","") or ""),_col(d,"bet_delay"),str(_col(d,"betting_type","") or ""),safe_float(_col(d,"market_base_rate")),_col(d,"number_of_winners"),_col(d,"in_play_enabled"),_col(d,"cross_matching"),_col(d,"discount_allowed"),_col(d,"persistence_enabled"),
                   str(_col(d,"race_code","") or ""),str(_col(d,"distance","") or ""),str(_col(d,"handicap_status","") or ""),str(_col(d,"race_category","") or ""),str(_col(d,"race_grade","") or ""))
+def race_fields_from_name(name,country):
+    if country != "GB":return "","","","",""
+    title=(name or "").strip()
+    distance_match=re.search(r"(?<![a-z0-9])((?:\d+m)?(?:\d+f)?(?:\d+y)?)(?=\s|$)",title,re.I)
+    distance=distance_match.group(1).lower() if distance_match and distance_match.group(1) else ""
+    if re.search(r"\b(?:Hrd|Hurdle)\b",title,re.I):code="Hurdle"
+    elif re.search(r"\b(?:Chs|Chase)\b",title,re.I):code="Chase"
+    elif re.search(r"\b(?:NHF|INHF|Bumper)\b",title,re.I):code="NH Flat / Bumper"
+    else:code="Flat"
+    handicap="Handicap" if re.search(r"\b(?:Hcap|Hcp|Handicap)\b",title,re.I) else "Non-handicap"
+    category="Other"
+    for label,pat in (("Nursery",r"\bNursery\b"),("Maiden",r"\b(?:Mdn|Maiden)\b"),("Novice",r"\b(?:Nov|Novice)\b"),("Selling",r"\b(?:Sell|Selling)\b"),("Claiming",r"\b(?:Claim|Claiming)\b"),("Conditions",r"\b(?:Cond|Conditions?)\b"),("Stakes",r"\b(?:Stks|Stakes)\b")):
+        if re.search(pat,title,re.I):category=label;break
+    grade=""
+    match=re.search(r"\b(?:Grp|Gp|Group)\s*([123])\b",title,re.I)
+    if match:grade="Group "+match.group(1)
+    else:
+        match=re.search(r"\b(?:Grade|Gd|Grd)\s*([123])\b",title,re.I)
+        if match:grade="Grade "+match.group(1)
+        elif re.search(r"\bListed\b",title,re.I):grade="Listed"
+    return code,distance,handicap,category,grade
+
+def raw_metadata(path):
+    opener=bz2.open if path.suffix.lower()==".bz2" else __import__("gzip").open if path.suffix.lower()==".gz" else open
+    latest=None
+    with opener(path,"rt",encoding="utf-8",errors="ignore") as f:
+        for line in f:
+            try:msg=json.loads(line)
+            except (ValueError,TypeError):continue
+            for mc in msg.get("mc",[]) if isinstance(msg,dict) else []:
+                if isinstance(mc.get("marketDefinition"),dict):latest=mc["marketDefinition"]
+    return latest or {}
+
+def enrich_market_from_raw(m,definition):
+    if not definition:return m
+    m.venue=str(definition.get("venue") or m.venue or "")
+    name=str(definition.get("name") or "")
+    code,dist,hand,cat,grade=race_fields_from_name(name,m.country)
+    m.race_code=code or m.race_code;m.distance=dist or m.distance
+    m.handicap_status=hand or m.handicap_status;m.race_category=cat or m.race_category;m.race_grade=grade or m.race_grade
+    return m
+
+def raw_lookup(r,plan):
+    # Existing raw files from the working admin pipeline. Map the remote-file hash
+    # embedded in the processed filename to the matching raw object key.
+    keys=r.list_any(f"raw/horse-racing/win/{slug(plan)}/",suffix="")
+    return {k.rsplit("/",1)[-1].split("-",1)[0]:k for k in keys}
+
+def needs_race_metadata(q):
+    return bool(q.venues or q.race_codes or q.distances or q.handicap_status or q.race_categories or q.race_grades)
+
 def mdate(m):
     try:return datetime.fromisoformat(m.market_time.replace("Z","+00:00")).date()
     except:return None
@@ -269,7 +320,11 @@ def discover(r,q):
         for c in sorted(set(x.upper() for x in q.countries)):
             enriched.update(r.list_any(f"processed-enriched/horse-racing/win/{slug(q.plan)}/year={y:04d}/month={m:02d}/country={c}/"))
             legacy.update(r.list(f"processed/horse-racing/win/{slug(q.plan)}/year={y:04d}/month={m:02d}/country={c}/"))
-    return sorted(enriched) if enriched else sorted(legacy)
+    # Prefer enriched per market while retaining all legacy-only markets.
+    by_market={}
+    for key in sorted(legacy):by_market[key.rsplit("/",1)[-1].split("-",1)[-1]]=key
+    for key in sorted(enriched):by_market[key.rsplit("/",1)[-1].split("-",1)[-1]]=key
+    return sorted(by_market.values())
 def between(v,lo,hi):
     if lo is None and hi is None:return True
     if v is None:return False
@@ -313,7 +368,18 @@ def work(j,qd,h,run_id):
         upd(r,j,status="running",progress=2,message="Finding processed Parquet partitions in R2…");keys=discover(r,q)
         if not keys:raise RuntimeError("No processed Parquet data found in R2 for this date/country/plan selection.")
         upd(r,j,status="running",progress=5,message=f"Found {len(keys):,} processed markets.",markets_found=len(keys))
-        bets=[];skip=0;cs=set(x.upper() for x in q.countries)
+        bets=[];skip=0;missing_metadata=0;cs=set(x.upper() for x in q.countries)
+        use_metadata=needs_race_metadata(q)
+        raw_index=raw_lookup(r,q.plan) if use_metadata else {}
+        source_index={}
+        if use_metadata:
+            for ik in r.list_any(f"processed-index/horse-racing/win/{slug(q.plan)}/",suffix=".json"):
+                try:
+                    ix=r.getj(ik)
+                    if ix and ix.get("parquet_key"):
+                        source_index[ix["parquet_key"].rsplit("/",1)[-1]]=ik.rsplit("/",1)[-1].removesuffix(".json")
+                except Exception:pass
+        upd(r,j,status="running",progress=5,message=f"Found {len(keys):,} markets. Reading race metadata…" if use_metadata else f"Found {len(keys):,} markets.")
         for i,key in enumerate(keys,1):
             try:
                 lp=local(key)
@@ -322,11 +388,20 @@ def work(j,qd,h,run_id):
                 if not m or not d or not(q.from_date<=d<=q.to_date) or m.country not in cs:continue
                 n=len(m.runners)
                 if n<q.min_runners or(q.max_runners and n>q.max_runners):continue
+                if use_metadata and not (m.venue and m.distance and m.race_code):
+                    filename=key.rsplit("/",1)[-1]
+                    source=source_index.get(filename) or filename.split("-",1)[0]
+                    raw_key_match=raw_index.get(source)
+                    if raw_key_match:
+                        raw_path=ROOT/"race-raw"/(hashlib.sha256(raw_key_match.encode()).hexdigest()+Path(raw_key_match).suffix)
+                        if not raw_path.exists() or not raw_path.stat().st_size:r.download(raw_key_match,raw_path)
+                        enrich_market_from_raw(m,raw_metadata(raw_path))
+                    if not (m.venue and m.distance and m.race_code):missing_metadata+=1
                 if not market_filters(m,q):continue
                 rr=pick(m,q.strategy,q.nth)
                 if rr and runner_filters(rr,q) and q.min_odds<=rr.bsp<=q.max_odds:bets.append(settle(m,rr,q))
             except:skip+=1
-            if i%max(1,len(keys)//20)==0:upd(r,j,status="running",progress=min(95,5+int(i/len(keys)*90)),message=f"Processed {i:,} of {len(keys):,} markets…")
+            if i%max(1,len(keys)//100)==0 or i==len(keys):upd(r,j,status="running",progress=min(95,5+int(i/len(keys)*90)),message=f"Processed {i:,} of {len(keys):,} markets; {len(bets):,} qualifying bets…",processed=i,qualifying_bets=len(bets))
         bets.sort(key=lambda x:x.market_time);s=stats(bets);groups={}
         for b in bets:groups.setdefault(band(b.bsp),[]).append(b)
         bands=[]
@@ -338,7 +413,9 @@ def work(j,qd,h,run_id):
         for b in bets:
             cumulative+=b.net
             graph_points.append({"market_time":b.market_time,"event_name":b.event_name,"horse":b.horse,"bsp":round(b.bsp,4),"bet_type":b.bet_type,"bet_net":round(b.net,4),"cumulative":round(cumulative,4)})
-        out={"engine_version":ENGINE,"cache_hash":h,"request":norm(q),"stats":s,"bands":bands,"graph_points":graph_points,"bets":[asdict(x) for x in bets[:MAX_BETS]],"bets_truncated":len(bets)>MAX_BETS,"total_bets":len(bets),"markets_found":len(keys),"skipped":skip,"elapsed_seconds":round(time.time()-t,3)}
+        out={"engine_version":ENGINE,"cache_hash":h,"request":norm(q),"stats":s,"bands":bands,"graph_points":graph_points,"bets":[asdict(x) for x in bets[:MAX_BETS]],"bets_truncated":len(bets)>MAX_BETS,"total_bets":len(bets),"markets_found":len(keys),"skipped":skip,"missing_race_metadata":missing_metadata,"elapsed_seconds":round(time.time()-t,3)}
+        if use_metadata and not bets and missing_metadata:
+            raise RuntimeError(f"No qualifying races. {missing_metadata:,} markets lack the required race metadata; verify raw R2 files are present and that the selected dates and venues match your data.")
         r.putj(rk(h),out)
         save_run(r,run_id,status="complete",job_id=j,result_hash=h,engine_version=ENGINE,request=out["request"],
                  roi=round(s["stake_roi"],6),net=round(s["net"],6),bets=s["bets"],strike=round(s["strike"],6),
