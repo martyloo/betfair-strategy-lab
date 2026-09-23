@@ -16,10 +16,10 @@ from pydantic import BaseModel,Field
 from starlette.middleware.sessions import SessionMiddleware
 
 ENGINE="public-web-v4-iceberg-prestart-ltp"; ROOT=Path(os.getenv("BETFAIR_WEB_CACHE",Path.home()/".betfair-public-web-cache"));ROOT.mkdir(parents=True,exist_ok=True)
-WORKERS=max(1,int(os.getenv("BACKTEST_WORKERS","4"))); MAX_BETS=max(100,int(os.getenv("MAX_BETS_RETURNED","5000")))
+WORKERS=1  # One concurrent scan on memory-constrained Render instances; MAX_BETS=max(100,int(os.getenv("MAX_BETS_RETURNED","5000")))
 POOL=ThreadPoolExecutor(max_workers=WORKERS,thread_name_prefix="backtest"); LOCK=threading.Lock(); JOBS={}
 API_BASE="https://historicdata.betfair.com/api/"
-ADMIN_WORKERS=max(1,int(os.getenv("ADMIN_INGEST_WORKERS","2"))); ADMIN_POOL=ThreadPoolExecutor(max_workers=ADMIN_WORKERS,thread_name_prefix="ingest"); ADMIN_JOBS={}; ADMIN_LOCK=threading.Lock()
+ADMIN_WORKERS=1; ADMIN_POOL=ThreadPoolExecutor(max_workers=ADMIN_WORKERS,thread_name_prefix="ingest"); ADMIN_JOBS={}; ADMIN_LOCK=threading.Lock()
 COUNTRIES=["GB","IE","US","AU","NZ","FR","DE","IT","ZA","AE","HK","SG","SE","NO","DK","ES","NL","BE","CA","CL","AR","BR","JP"]
 BANDS=[(1.01,2),(2,3),(3,5),(5,10),(10,20),(20,30),(30,50),(50,100),(100,200),(200,500),(500,1001)]
 
@@ -283,40 +283,36 @@ def normalized_time(v):
         return d.replace(tzinfo=timezone.utc) if d.tzinfo is None else d.astimezone(timezone.utc)
     except (TypeError,ValueError):return None
 
+def scan_rows(table, row_filter=None, selected_fields=None, batch_size=256):
+    """Iterate bounded Arrow record batches; never materialise a complete Iceberg scan."""
+    kwargs={"row_filter":row_filter} if row_filter is not None else {}
+    if selected_fields is not None:kwargs["selected_fields"]=selected_fields
+    scan=table.scan(**kwargs)
+    reader=scan.to_arrow_batch_reader()
+    for batch in reader:
+        for small in batch.to_batches(max_chunksize=batch_size) if hasattr(batch,"to_batches") else [batch]:
+            for row in small.to_pylist():yield row
+
 def load_historical_markets(q,progress=None):
     races_table,runners_table,prices_table=catalog_tables()
     start=datetime.combine(q.from_date,datetime.min.time(),tzinfo=timezone.utc)
     end=datetime.combine(q.to_date+timedelta(days=1),datetime.min.time(),tzinfo=timezone.utc)
-    # Filter race partitions before materializing runner/price data. The Iceberg scan
-    # predicates are pushed down where the table layout permits it.
     race_filter=And(GreaterThanOrEqual("market_time",start),LessThanOrEqual("market_time",end))
-    race_rows=races_table.scan(row_filter=race_filter).to_arrow().to_pylist()
     wanted={str(x).upper() for x in q.countries}
-    selected={}
-    for row in race_rows:
-        mid=str(row.get("market_id") or "")
-        dt=normalized_time(row.get("market_time"))
-        if mid and dt and q.from_date<=dt.date()<=q.to_date and str(row.get("country") or "").upper() in wanted:
-            selected[mid]=row
-    if not selected:return []
-    mids=list(selected)
-    runners_by_market={mid:[] for mid in mids}
-    # Chunk IN expressions to avoid very large REST/scan predicates.
-    for offset in range(0,len(mids),250):
-        chunk=mids[offset:offset+250]
-        for row in runners_table.scan(row_filter=In("market_id",chunk)).to_arrow().to_pylist():
+    # The result is still a list of compact markets, but raw tick data is never
+    # accumulated across markets or converted into one giant Python list.
+    output=[];chunk=[];seen=0
+    def process_chunk(selected):
+        if not selected:return
+        mids=list(selected);runners_by_market={mid:[] for mid in mids}
+        for row in scan_rows(runners_table,In("market_id",mids),
+                             ("market_id","selection_id","horse_name","status","adjustment_factor","sort_priority")):
             mid=str(row.get("market_id") or "")
             if mid in selected:runners_by_market[mid].append(row)
-        if progress:progress(min(35,5+int(30*(offset+len(chunk))/len(mids))),"Loading historical runners…")
-    # Only scan prices for markets that have eligible runners. Scan in chunks so
-    # a decade of tick data is never loaded into a single in-memory Arrow table.
-    output=[]
-    for offset in range(0,len(mids),25):
-        chunk=mids[offset:offset+25]
         last={}
-        for row in prices_table.scan(row_filter=In("market_id",chunk)).to_arrow().to_pylist():
-            mid=str(row.get("market_id") or "")
-            race=selected.get(mid)
+        for row in scan_rows(prices_table,In("market_id",mids),
+                             ("market_id","selection_id","publish_time","update_number","last_traded_price")):
+            mid=str(row.get("market_id") or "");race=selected.get(mid)
             if race is None:continue
             sid=row.get("selection_id")
             if sid is None:continue
@@ -325,20 +321,28 @@ def load_historical_markets(q,progress=None):
             if pt is None or mt is None or pt>mt or price is None or not 1.01<=price<=1000:continue
             key=(mid,int(sid));order=(pt,int(row.get("update_number") or 0))
             if key not in last or order>last[key][0]:last[key]=(order,price)
-        for mid in chunk:
-            race=selected[mid];rs=[]
+        for mid,race in selected.items():
+            rs=[]
             for row in runners_by_market[mid]:
                 status=str(row.get("status") or "").upper()
                 if status not in ("WINNER","LOSER"):continue
                 sid=row.get("selection_id")
                 if sid is None or (mid,int(sid)) not in last:continue
-                price=last[(mid,int(sid))][1]
-                priority=row.get("sort_priority")
+                price=last[(mid,int(sid))][1];priority=row.get("sort_priority")
                 rs.append(Runner(int(sid),str(row.get("horse_name") or f"Selection {sid}"),price,status=="WINNER",safe_float(row.get("adjustment_factor")),int(priority) if priority is not None else None,status,price))
             if len(rs)<2 or sum(x.winner for x in rs)!=1:continue
             mt=normalized_time(race.get("market_time"))
             output.append(Market(mid,mt.isoformat(),str(race.get("event_name") or race.get("race_name") or ""),str(race.get("country") or "").upper(),rs,venue=str(race.get("venue") or ""),distance=str(race.get("distance_text") or "")))
-        if progress:progress(min(94,35+int(59*(offset+len(chunk))/len(mids))),f"Loaded prices for {offset+len(chunk):,} of {len(mids):,} races…")
+    for row in scan_rows(races_table,race_filter,
+                         ("market_id","market_time","country","event_name","race_name","venue","distance_text")):
+        mid=str(row.get("market_id") or "");dt=normalized_time(row.get("market_time"))
+        if not mid or not dt or not q.from_date<=dt.date()<=q.to_date or str(row.get("country") or "").upper() not in wanted:continue
+        chunk.append((mid,row))
+        if len(chunk)>=5:
+            process_chunk(dict(chunk));seen+=len(chunk);chunk.clear()
+            if progress:progress(35,f"Processed {seen:,} historical races…")
+    if chunk:process_chunk(dict(chunk));seen+=len(chunk)
+    if progress:progress(94,f"Loaded {len(output):,} eligible races from {seen:,} records…")
     return output
 
 def between(v,lo,hi):
@@ -422,7 +426,9 @@ def home(request:Request):return templates.TemplateResponse(request=request,name
 def filter_options(plan:str="Basic Plan",country:str="GB"):
     races,_,_=catalog_tables()
     venues=set();distances=set();codes=set()
-    for row in races.scan(selected_fields=("country","venue","distance_text","race_name")).to_arrow().to_pylist():
+    # Apply country filtering at scan time and iterate in bounded record batches.
+    from pyiceberg.expressions import EqualTo
+    for row in scan_rows(races,EqualTo("country",country.upper()),("country","venue","distance_text")):
         if str(row.get("country") or "").upper()!=country.upper():continue
         if row.get("venue"):venues.add(str(row["venue"]))
         if row.get("distance_text"):distances.add(str(row["distance_text"]))
