@@ -5,3 +5,4 @@ boto3>=1.35
 pyarrow>=17
 requests>=2.32
 itsdangerous>=2.2
+pyiceberg[pyarrow,s3fs]>=0.9,<1
