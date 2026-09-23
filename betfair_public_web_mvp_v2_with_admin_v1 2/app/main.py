@@ -5,6 +5,8 @@ from dataclasses import dataclass,asdict
 from datetime import date,datetime,timezone,timedelta
 from pathlib import Path
 import boto3,pyarrow as pa,pyarrow.parquet as pq,requests
+from pyiceberg.catalog.rest import RestCatalog
+from pyiceberg.expressions import And, GreaterThanOrEqual, LessThanOrEqual, In
 from botocore.exceptions import ClientError
 from fastapi import FastAPI,HTTPException,Request,Depends,Response
 from fastapi.responses import HTMLResponse,RedirectResponse
@@ -13,7 +15,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel,Field
 from starlette.middleware.sessions import SessionMiddleware
 
-ENGINE="public-web-v3.4-csv-history"; ROOT=Path(os.getenv("BETFAIR_WEB_CACHE",Path.home()/".betfair-public-web-cache"));ROOT.mkdir(parents=True,exist_ok=True)
+ENGINE="public-web-v4-iceberg-prestart-ltp"; ROOT=Path(os.getenv("BETFAIR_WEB_CACHE",Path.home()/".betfair-public-web-cache"));ROOT.mkdir(parents=True,exist_ok=True)
 WORKERS=max(1,int(os.getenv("BACKTEST_WORKERS","4"))); MAX_BETS=max(100,int(os.getenv("MAX_BETS_RETURNED","5000")))
 POOL=ThreadPoolExecutor(max_workers=WORKERS,thread_name_prefix="backtest"); LOCK=threading.Lock(); JOBS={}
 API_BASE="https://historicdata.betfair.com/api/"
@@ -263,13 +265,82 @@ def upd(r,j,**c):
         x=JOBS.get(j,{"job_id":j});x.update(c);x["updated_at"]=datetime.now(timezone.utc).isoformat();JOBS[j]=x.copy()
     try:r.putj(jk(j),x)
     except:pass
-def discover(r,q):
-    enriched=set();legacy=set()
-    for y,m in months(q.from_date,q.to_date):
-        for c in sorted(set(x.upper() for x in q.countries)):
-            enriched.update(r.list_any(f"processed-enriched/horse-racing/win/{slug(q.plan)}/year={y:04d}/month={m:02d}/country={c}/"))
-            legacy.update(r.list(f"processed/horse-racing/win/{slug(q.plan)}/year={y:04d}/month={m:02d}/country={c}/"))
-    return sorted(enriched) if enriched else sorted(legacy)
+def catalog_tables():
+    uri=os.getenv("R2_CATALOG_URI", "").strip()
+    warehouse=os.getenv("R2_CATALOG_WAREHOUSE", "").strip()
+    token=os.getenv("R2_CATALOG_TOKEN", "").strip()
+    if not all((uri,warehouse,token)):
+        raise RuntimeError("R2_CATALOG_URI, R2_CATALOG_WAREHOUSE and R2_CATALOG_TOKEN must be set in Render")
+    catalog=RestCatalog(name="betfair_historical",uri=uri,warehouse=warehouse,token=token)
+    return tuple(catalog.load_table(("default", name)) for name in ("races","runners","price_updates"))
+
+def normalized_time(v):
+    if isinstance(v,datetime):
+        return v.replace(tzinfo=timezone.utc) if v.tzinfo is None else v.astimezone(timezone.utc)
+    if v is None:return None
+    try:
+        d=datetime.fromisoformat(str(v).replace("Z","+00:00"))
+        return d.replace(tzinfo=timezone.utc) if d.tzinfo is None else d.astimezone(timezone.utc)
+    except (TypeError,ValueError):return None
+
+def load_historical_markets(q,progress=None):
+    races_table,runners_table,prices_table=catalog_tables()
+    start=datetime.combine(q.from_date,datetime.min.time(),tzinfo=timezone.utc)
+    end=datetime.combine(q.to_date+timedelta(days=1),datetime.min.time(),tzinfo=timezone.utc)
+    # Filter race partitions before materializing runner/price data. The Iceberg scan
+    # predicates are pushed down where the table layout permits it.
+    race_filter=And(GreaterThanOrEqual("market_time",start),LessThanOrEqual("market_time",end))
+    race_rows=races_table.scan(row_filter=race_filter).to_arrow().to_pylist()
+    wanted={str(x).upper() for x in q.countries}
+    selected={}
+    for row in race_rows:
+        mid=str(row.get("market_id") or "")
+        dt=normalized_time(row.get("market_time"))
+        if mid and dt and q.from_date<=dt.date()<=q.to_date and str(row.get("country") or "").upper() in wanted:
+            selected[mid]=row
+    if not selected:return []
+    mids=list(selected)
+    runners_by_market={mid:[] for mid in mids}
+    # Chunk IN expressions to avoid very large REST/scan predicates.
+    for offset in range(0,len(mids),250):
+        chunk=mids[offset:offset+250]
+        for row in runners_table.scan(row_filter=In("market_id",chunk)).to_arrow().to_pylist():
+            mid=str(row.get("market_id") or "")
+            if mid in selected:runners_by_market[mid].append(row)
+        if progress:progress(min(35,5+int(30*(offset+len(chunk))/len(mids))),"Loading historical runners…")
+    # Only scan prices for markets that have eligible runners. Scan in chunks so
+    # a decade of tick data is never loaded into a single in-memory Arrow table.
+    output=[]
+    for offset in range(0,len(mids),25):
+        chunk=mids[offset:offset+25]
+        last={}
+        for row in prices_table.scan(row_filter=In("market_id",chunk)).to_arrow().to_pylist():
+            mid=str(row.get("market_id") or "")
+            race=selected.get(mid)
+            if race is None:continue
+            sid=row.get("selection_id")
+            if sid is None:continue
+            pt=normalized_time(row.get("publish_time"));mt=normalized_time(race.get("market_time"))
+            price=safe_float(row.get("last_traded_price"))
+            if pt is None or mt is None or pt>mt or price is None or not 1.01<=price<=1000:continue
+            key=(mid,int(sid));order=(pt,int(row.get("update_number") or 0))
+            if key not in last or order>last[key][0]:last[key]=(order,price)
+        for mid in chunk:
+            race=selected[mid];rs=[]
+            for row in runners_by_market[mid]:
+                status=str(row.get("status") or "").upper()
+                if status not in ("WINNER","LOSER"):continue
+                sid=row.get("selection_id")
+                if sid is None or (mid,int(sid)) not in last:continue
+                price=last[(mid,int(sid))][1]
+                priority=row.get("sort_priority")
+                rs.append(Runner(int(sid),str(row.get("horse_name") or f"Selection {sid}"),price,status=="WINNER",safe_float(row.get("adjustment_factor")),int(priority) if priority is not None else None,status,price))
+            if len(rs)<2 or sum(x.winner for x in rs)!=1:continue
+            mt=normalized_time(race.get("market_time"))
+            output.append(Market(mid,mt.isoformat(),str(race.get("event_name") or race.get("race_name") or ""),str(race.get("country") or "").upper(),rs,venue=str(race.get("venue") or ""),distance=str(race.get("distance_text") or "")))
+        if progress:progress(min(94,35+int(59*(offset+len(chunk))/len(mids))),f"Loaded prices for {offset+len(chunk):,} of {len(mids):,} races…")
+    return output
+
 def between(v,lo,hi):
     if lo is None and hi is None:return True
     if v is None:return False
@@ -310,23 +381,15 @@ def runner_filters(r,q):
 def work(j,qd,h,run_id):
     r=R2();q=Req(**qd);t=time.time()
     try:
-        upd(r,j,status="running",progress=2,message="Finding processed Parquet partitions in R2…");keys=discover(r,q)
-        if not keys:raise RuntimeError("No processed Parquet data found in R2 for this date/country/plan selection.")
-        upd(r,j,status="running",progress=5,message=f"Found {len(keys):,} processed markets.",markets_found=len(keys))
-        bets=[];skip=0;cs=set(x.upper() for x in q.countries)
-        for i,key in enumerate(keys,1):
-            try:
-                lp=local(key)
-                if not lp.exists() or not lp.stat().st_size:r.download(key,lp)
-                m=readm(lp);d=mdate(m) if m else None
-                if not m or not d or not(q.from_date<=d<=q.to_date) or m.country not in cs:continue
-                n=len(m.runners)
-                if n<q.min_runners or(q.max_runners and n>q.max_runners):continue
-                if not market_filters(m,q):continue
-                rr=pick(m,q.strategy,q.nth)
-                if rr and runner_filters(rr,q) and q.min_odds<=rr.bsp<=q.max_odds:bets.append(settle(m,rr,q))
-            except:skip+=1
-            if i%max(1,len(keys)//20)==0:upd(r,j,status="running",progress=min(95,5+int(i/len(keys)*90)),message=f"Processed {i:,} of {len(keys):,} markets…")
+        upd(r,j,status="running",progress=2,message="Querying Cloudflare Iceberg historical tables…")
+        markets=load_historical_markets(q,lambda pct,msg:upd(r,j,status="running",progress=pct,message=msg))
+        bets=[];skip=0
+        for m in markets:
+            n=len(m.runners)
+            if n<q.min_runners or(q.max_runners and n>q.max_runners):continue
+            if not market_filters(m,q):continue
+            rr=pick(m,q.strategy,q.nth)
+            if rr and runner_filters(rr,q) and q.min_odds<=rr.bsp<=q.max_odds:bets.append(settle(m,rr,q))
         bets.sort(key=lambda x:x.market_time);s=stats(bets);groups={}
         for b in bets:groups.setdefault(band(b.bsp),[]).append(b)
         bands=[]
@@ -338,7 +401,7 @@ def work(j,qd,h,run_id):
         for b in bets:
             cumulative+=b.net
             graph_points.append({"market_time":b.market_time,"event_name":b.event_name,"horse":b.horse,"bsp":round(b.bsp,4),"bet_type":b.bet_type,"bet_net":round(b.net,4),"cumulative":round(cumulative,4)})
-        out={"engine_version":ENGINE,"cache_hash":h,"request":norm(q),"stats":s,"bands":bands,"graph_points":graph_points,"bets":[asdict(x) for x in bets[:MAX_BETS]],"bets_truncated":len(bets)>MAX_BETS,"total_bets":len(bets),"markets_found":len(keys),"skipped":skip,"elapsed_seconds":round(time.time()-t,3)}
+        out={"price_source":"latest pre-start last_traded_price (not BSP)","engine_version":ENGINE,"cache_hash":h,"request":norm(q),"stats":s,"bands":bands,"graph_points":graph_points,"bets":[asdict(x) for x in bets[:MAX_BETS]],"bets_truncated":len(bets)>MAX_BETS,"total_bets":len(bets),"markets_found":len(markets),"skipped":skip,"elapsed_seconds":round(time.time()-t,3)}
         r.putj(rk(h),out)
         save_run(r,run_id,status="complete",job_id=j,result_hash=h,engine_version=ENGINE,request=out["request"],
                  roi=round(s["stake_roi"],6),net=round(s["net"],6),bets=s["bets"],strike=round(s["strike"],6),
@@ -357,34 +420,17 @@ def home(request:Request):return templates.TemplateResponse(request=request,name
 
 @app.get("/api/filter-options")
 def filter_options(plan:str="Basic Plan",country:str="GB"):
-    r=R2(); base=f"processed-enriched/horse-racing/win/{slug(plan)}/"
-    keys=r.list_any(base)
-    venues=set();distances=set();codes=set();cats=set();grades=set()
-    # metadata only: read columns from enriched files; cap is deliberately generous
-    for k in keys:
-        if f"/country={country.upper()}/" not in k: continue
-        try:
-            path=local(k); r.download(k,path) if not path.exists() else None
-            d=pq.read_table(path,columns=["venue","distance","race_code","race_category","race_grade"]).to_pydict()
-            for field,target in [("venue",venues),("distance",distances),("race_code",codes),("race_category",cats),("race_grade",grades)]:
-                for v in d.get(field,[]) or []:
-                    if v: target.add(str(v))
-        except Exception: continue
-    def dkey(x):
-        m=re.match(r"(?:(\d+)m)?(?:(\d+)f)?",x)
-        return (int(m.group(1) or 0)*8+int(m.group(2) or 0)) if m else 9999
-    # Distance remains usable before a full enrichment has completed. These are
-    # normal GB racing increments; values discovered in the user's data are merged in.
-    fallback_distances={"5f","6f","7f","1m","1m1f","1m2f","1m3f","1m4f","1m5f","1m6f","1m7f",
-                        "2m","2m1f","2m2f","2m3f","2m4f","2m5f","2m6f","2m7f","3m","3m1f",
-                        "3m2f","3m3f","3m4f","3m5f","3m6f"}
-    distances.update(fallback_distances)
-    return {"venues":sorted(venues),"distances":sorted(distances,key=dkey),"race_codes":sorted(codes),
-            "race_categories":sorted(cats),"race_grades":sorted(grades)}
+    races,_,_=catalog_tables()
+    venues=set();distances=set();codes=set()
+    for row in races.scan(selected_fields=("country","venue","distance_text","race_name")).to_arrow().to_pylist():
+        if str(row.get("country") or "").upper()!=country.upper():continue
+        if row.get("venue"):venues.add(str(row["venue"]))
+        if row.get("distance_text"):distances.add(str(row["distance_text"]))
+    return {"venues":sorted(venues),"distances":sorted(distances),"race_codes":sorted(codes),"race_categories":[],"race_grades":[]}
 
 @app.get("/api/health")
 def health():
-    try:r=R2();r.test();return {"ok":True,"r2":True,"workers":WORKERS,"engine":ENGINE}
+    try:r=R2();r.test();catalog_tables();return {"ok":True,"r2":True,"catalog":True,"workers":WORKERS,"engine":ENGINE}
     except Exception as e:return {"ok":False,"r2":False,"workers":WORKERS,"error":str(e)}
 @app.post("/api/jobs",status_code=202)
 def create(q:Req):
