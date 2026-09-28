@@ -4,9 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass,asdict
 from datetime import date,datetime,timezone,timedelta
 from pathlib import Path
-import boto3,pyarrow as pa,pyarrow.parquet as pq,requests
-from pyiceberg.catalog.rest import RestCatalog
-from pyiceberg.expressions import And, GreaterThanOrEqual, LessThanOrEqual, In
+import boto3,duckdb,pyarrow as pa,pyarrow.parquet as pq,requests
 from botocore.exceptions import ClientError
 from fastapi import FastAPI,HTTPException,Request,Depends,Response
 from fastapi.responses import HTMLResponse,RedirectResponse
@@ -15,8 +13,13 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel,Field
 from starlette.middleware.sessions import SessionMiddleware
 
-ENGINE="public-web-v4-iceberg-prestart-ltp"; ROOT=Path(os.getenv("BETFAIR_WEB_CACHE",Path.home()/".betfair-public-web-cache"));ROOT.mkdir(parents=True,exist_ok=True)
-WORKERS=1  # One concurrent scan on memory-constrained Render instances; MAX_BETS=max(100,int(os.getenv("MAX_BETS_RETURNED","5000")))
+ENGINE="public-web-v5-duckdb-prestart-ltp"; ROOT=Path(os.getenv("BETFAIR_WEB_CACHE",Path.home()/".betfair-public-web-cache"));ROOT.mkdir(parents=True,exist_ok=True)
+WORKERS=max(1,int(os.getenv("BACKTEST_WORKERS","1")))
+MAX_BETS=max(100,int(os.getenv("MAX_BETS_RETURNED","5000")))
+DB_PATH=Path(os.getenv("BETFAIR_DUCKDB_PATH",str(ROOT/"betfair.duckdb")))
+DB_R2_BUCKET=os.getenv("BETFAIR_DUCKDB_R2_BUCKET","betfair-historical-database").strip()
+DB_R2_KEY=os.getenv("BETFAIR_DUCKDB_R2_KEY","compact/betfair.duckdb").strip()
+DB_LOCK=threading.Lock()
 POOL=ThreadPoolExecutor(max_workers=WORKERS,thread_name_prefix="backtest"); LOCK=threading.Lock(); JOBS={}
 API_BASE="https://historicdata.betfair.com/api/"
 ADMIN_WORKERS=1; ADMIN_POOL=ThreadPoolExecutor(max_workers=ADMIN_WORKERS,thread_name_prefix="ingest"); ADMIN_JOBS={}; ADMIN_LOCK=threading.Lock()
@@ -265,14 +268,37 @@ def upd(r,j,**c):
         x=JOBS.get(j,{"job_id":j});x.update(c);x["updated_at"]=datetime.now(timezone.utc).isoformat();JOBS[j]=x.copy()
     try:r.putj(jk(j),x)
     except:pass
-def catalog_tables():
-    uri=os.getenv("R2_CATALOG_URI", "").strip()
-    warehouse=os.getenv("R2_CATALOG_WAREHOUSE", "").strip()
-    token=os.getenv("R2_CATALOG_TOKEN", "").strip()
-    if not all((uri,warehouse,token)):
-        raise RuntimeError("R2_CATALOG_URI, R2_CATALOG_WAREHOUSE and R2_CATALOG_TOKEN must be set in Render")
-    catalog=RestCatalog(name="betfair_historical",uri=uri,warehouse=warehouse,token=token)
-    return tuple(catalog.load_table(("default", name)) for name in ("races","runners","price_updates"))
+def compact_db_store():
+    e=os.getenv("R2_ENDPOINT","").strip();a=os.getenv("R2_ACCESS_KEY_ID","").strip();secret=os.getenv("R2_SECRET_ACCESS_KEY","").strip()
+    if not all((e,a,secret,DB_R2_BUCKET,DB_R2_KEY)):
+        raise RuntimeError("R2 database download settings are not fully configured.")
+    return boto3.client("s3",endpoint_url=e,aws_access_key_id=a,aws_secret_access_key=secret,region_name="auto")
+
+def validate_compact_db(path:Path):
+    con=duckdb.connect(str(path),read_only=True)
+    try:
+        tables={x[0] for x in con.execute("SHOW TABLES").fetchall()}
+        if "backtest_runners" not in tables:raise RuntimeError("Compact database is missing backtest_runners.")
+        row=con.execute("SELECT COUNT(*), MIN(market_time), MAX(market_time) FROM backtest_runners").fetchone()
+        if not row or not row[0]:raise RuntimeError("Compact database contains no backtest rows.")
+        return {"rows":int(row[0]),"first_race":str(row[1]),"last_race":str(row[2])}
+    finally:con.close()
+
+def ensure_compact_db(force=False):
+    with DB_LOCK:
+        if DB_PATH.exists() and DB_PATH.stat().st_size>0 and not force:
+            try:validate_compact_db(DB_PATH);return DB_PATH
+            except Exception:
+                try:DB_PATH.unlink()
+                except FileNotFoundError:pass
+        DB_PATH.parent.mkdir(parents=True,exist_ok=True)
+        tmp=DB_PATH.parent/(DB_PATH.name+".r2part")
+        if tmp.exists():tmp.unlink()
+        compact_db_store().download_file(DB_R2_BUCKET,DB_R2_KEY,str(tmp))
+        if not tmp.exists() or tmp.stat().st_size==0:raise RuntimeError("Compact DuckDB download from R2 failed.")
+        validate_compact_db(tmp)
+        tmp.replace(DB_PATH)
+        return DB_PATH
 
 def normalized_time(v):
     if isinstance(v,datetime):
@@ -283,66 +309,53 @@ def normalized_time(v):
         return d.replace(tzinfo=timezone.utc) if d.tzinfo is None else d.astimezone(timezone.utc)
     except (TypeError,ValueError):return None
 
-def scan_rows(table, row_filter=None, selected_fields=None, batch_size=256):
-    """Iterate bounded Arrow record batches; never materialise a complete Iceberg scan."""
-    kwargs={"row_filter":row_filter} if row_filter is not None else {}
-    if selected_fields is not None:kwargs["selected_fields"]=selected_fields
-    scan=table.scan(**kwargs)
-    reader=scan.to_arrow_batch_reader()
-    for batch in reader:
-        for small in batch.to_batches(max_chunksize=batch_size) if hasattr(batch,"to_batches") else [batch]:
-            for row in small.to_pylist():yield row
-
 def load_historical_markets(q,progress=None):
-    races_table,runners_table,prices_table=catalog_tables()
-    start=datetime.combine(q.from_date,datetime.min.time(),tzinfo=timezone.utc)
-    end=datetime.combine(q.to_date+timedelta(days=1),datetime.min.time(),tzinfo=timezone.utc)
-    race_filter=And(GreaterThanOrEqual("market_time",start),LessThanOrEqual("market_time",end))
-    wanted={str(x).upper() for x in q.countries}
-    # The result is still a list of compact markets, but raw tick data is never
-    # accumulated across markets or converted into one giant Python list.
-    output=[];chunk=[];seen=0
-    def process_chunk(selected):
-        if not selected:return
-        mids=list(selected);runners_by_market={mid:[] for mid in mids}
-        for row in scan_rows(runners_table,In("market_id",mids),
-                             ("market_id","selection_id","horse_name","status","adjustment_factor","sort_priority")):
-            mid=str(row.get("market_id") or "")
-            if mid in selected:runners_by_market[mid].append(row)
-        last={}
-        for row in scan_rows(prices_table,In("market_id",mids),
-                             ("market_id","selection_id","publish_time","update_number","last_traded_price")):
-            mid=str(row.get("market_id") or "");race=selected.get(mid)
-            if race is None:continue
-            sid=row.get("selection_id")
-            if sid is None:continue
-            pt=normalized_time(row.get("publish_time"));mt=normalized_time(race.get("market_time"))
-            price=safe_float(row.get("last_traded_price"))
-            if pt is None or mt is None or pt>mt or price is None or not 1.01<=price<=1000:continue
-            key=(mid,int(sid));order=(pt,int(row.get("update_number") or 0))
-            if key not in last or order>last[key][0]:last[key]=(order,price)
-        for mid,race in selected.items():
-            rs=[]
-            for row in runners_by_market[mid]:
-                status=str(row.get("status") or "").upper()
-                if status not in ("WINNER","LOSER"):continue
-                sid=row.get("selection_id")
-                if sid is None or (mid,int(sid)) not in last:continue
-                price=last[(mid,int(sid))][1];priority=row.get("sort_priority")
-                rs.append(Runner(int(sid),str(row.get("horse_name") or f"Selection {sid}"),price,status=="WINNER",safe_float(row.get("adjustment_factor")),int(priority) if priority is not None else None,status,price))
-            if len(rs)<2 or sum(x.winner for x in rs)!=1:continue
-            mt=normalized_time(race.get("market_time"))
-            output.append(Market(mid,mt.isoformat(),str(race.get("event_name") or race.get("race_name") or ""),str(race.get("country") or "").upper(),rs,venue=str(race.get("venue") or ""),distance=str(race.get("distance_text") or "")))
-    for row in scan_rows(races_table,race_filter,
-                         ("market_id","market_time","country","event_name","race_name","venue","distance_text")):
-        mid=str(row.get("market_id") or "");dt=normalized_time(row.get("market_time"))
-        if not mid or not dt or not q.from_date<=dt.date()<=q.to_date or str(row.get("country") or "").upper() not in wanted:continue
-        chunk.append((mid,row))
-        if len(chunk)>=5:
-            process_chunk(dict(chunk));seen+=len(chunk);chunk.clear()
-            if progress:progress(35,f"Processed {seen:,} historical races…")
-    if chunk:process_chunk(dict(chunk));seen+=len(chunk)
-    if progress:progress(94,f"Loaded {len(output):,} eligible races from {seen:,} records…")
+    path=ensure_compact_db()
+    if progress:progress(10,"Opening compact historical database…")
+    wanted=sorted({str(x).upper() for x in q.countries})
+    if not wanted:return []
+    placeholders=",".join("?" for _ in wanted)
+    start=datetime.combine(q.from_date,datetime.min.time())
+    end=datetime.combine(q.to_date+timedelta(days=1),datetime.min.time())
+    sql=f"""
+        SELECT market_id,market_time,country,venue,race_name,event_name,distance_text,
+               selection_id,horse_name,status,sort_priority,adjustment_factor,pre_start_ltp
+        FROM backtest_runners
+        WHERE market_time >= ? AND market_time < ?
+          AND upper(country) IN ({placeholders})
+          AND status IN ('WINNER','LOSER')
+          AND pre_start_ltp IS NOT NULL
+          AND pre_start_ltp BETWEEN 1.01 AND 1000
+        ORDER BY market_time,market_id,sort_priority NULLS LAST,selection_id
+    """
+    con=duckdb.connect(str(path),read_only=True)
+    output=[];current_mid=None;race_meta=None;rs=[];rows_seen=0
+    def finish_market():
+        nonlocal rs,race_meta,current_mid
+        if current_mid is None or race_meta is None:return
+        if len(rs)>=2 and sum(x.winner for x in rs)==1:
+            mid,mt,country,venue,race_name,event_name,distance=race_meta
+            dt=normalized_time(mt)
+            output.append(Market(str(mid),dt.isoformat() if dt else str(mt),str(event_name or race_name or ""),str(country or "").upper(),rs,venue=str(venue or ""),distance=str(distance or "")))
+    try:
+        cur=con.execute(sql,[start,end,*wanted])
+        while True:
+            batch=cur.fetchmany(10000)
+            if not batch:break
+            for row in batch:
+                mid=str(row[0] or "")
+                if current_mid is not None and mid!=current_mid:
+                    finish_market();rs=[]
+                if mid!=current_mid:
+                    current_mid=mid;race_meta=row[:7]
+                sid=row[7];status=str(row[9] or "").upper();price=safe_float(row[12]);priority=row[10]
+                if sid is None or price is None:continue
+                rs.append(Runner(int(sid),str(row[8] or f"Selection {sid}"),price,status=="WINNER",safe_float(row[11]),int(priority) if priority is not None else None,status,price))
+                rows_seen+=1
+            if progress:progress(min(90,10+int(rows_seen/10000)),f"Loaded {rows_seen:,} runner rows from compact database…")
+        finish_market()
+    finally:con.close()
+    if progress:progress(94,f"Loaded {len(output):,} eligible races from compact database…")
     return output
 
 def between(v,lo,hi):
@@ -385,7 +398,7 @@ def runner_filters(r,q):
 def work(j,qd,h,run_id):
     r=R2();q=Req(**qd);t=time.time()
     try:
-        upd(r,j,status="running",progress=2,message="Querying Cloudflare Iceberg historical tables…")
+        upd(r,j,status="running",progress=2,message="Querying compact DuckDB historical database…")
         markets=load_historical_markets(q,lambda pct,msg:upd(r,j,status="running",progress=pct,message=msg))
         bets=[];skip=0
         for m in markets:
@@ -424,20 +437,24 @@ def home(request:Request):return templates.TemplateResponse(request=request,name
 
 @app.get("/api/filter-options")
 def filter_options(plan:str="Basic Plan",country:str="GB"):
-    races,_,_=catalog_tables()
-    venues=set();distances=set();codes=set()
-    # Apply country filtering at scan time and iterate in bounded record batches.
-    from pyiceberg.expressions import EqualTo
-    for row in scan_rows(races,EqualTo("country",country.upper()),("country","venue","distance_text")):
-        if str(row.get("country") or "").upper()!=country.upper():continue
-        if row.get("venue"):venues.add(str(row["venue"]))
-        if row.get("distance_text"):distances.add(str(row["distance_text"]))
-    return {"venues":sorted(venues),"distances":sorted(distances),"race_codes":sorted(codes),"race_categories":[],"race_grades":[]}
+    path=ensure_compact_db();con=duckdb.connect(str(path),read_only=True)
+    try:
+        rows=con.execute("""
+            SELECT DISTINCT venue,distance_text
+            FROM races
+            WHERE upper(country)=?
+            ORDER BY venue,distance_text
+        """,[country.upper()]).fetchall()
+    finally:con.close()
+    venues=sorted({str(v) for v,d in rows if v});distances=sorted({str(d) for v,d in rows if d})
+    return {"venues":venues,"distances":distances,"race_codes":[],"race_categories":[],"race_grades":[]}
 
 @app.get("/api/health")
 def health():
-    try:r=R2();r.test();catalog_tables();return {"ok":True,"r2":True,"catalog":True,"workers":WORKERS,"engine":ENGINE}
-    except Exception as e:return {"ok":False,"r2":False,"workers":WORKERS,"error":str(e)}
+    try:
+        r=R2();r.test();path=ensure_compact_db();info=validate_compact_db(path)
+        return {"ok":True,"r2":True,"duckdb":True,"database":info,"workers":WORKERS,"engine":ENGINE}
+    except Exception as e:return {"ok":False,"r2":False,"duckdb":False,"workers":WORKERS,"engine":ENGINE,"error":str(e)}
 @app.post("/api/jobs",status_code=202)
 def create(q:Req):
     if q.from_date>q.to_date:raise HTTPException(400,"From date must be before To date.")
@@ -546,6 +563,13 @@ def automatic_update_once():
     end=date.today()-timedelta(days=1);start=end-timedelta(days=days)
     q=AdminIngestRequest(from_date=start,to_date=end,countries=countries,plan=plan);j="auto-"+datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
     ADMIN_POOL.submit(ingest,j,q.model_dump(mode="json"))
+
+@app.on_event("startup")
+def prepare_compact_database():
+    # Download and validate the compact DB before serving backtests. If startup
+    # cannot reach R2, keep the process alive so /api/health exposes the error.
+    try:ensure_compact_db()
+    except Exception as e:print(f"Compact database startup warning: {e}",flush=True)
 
 @app.on_event("startup")
 def start_auto_updater():
