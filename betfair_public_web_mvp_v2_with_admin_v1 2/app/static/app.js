@@ -1,92 +1,957 @@
 const $=x=>document.getElementById(x),v=x=>$(x).value;let timer;
 const selected=id=>[...document.querySelectorAll(`#${id} .multi-options input:checked`)].map(x=>x.value);
+
 function updateMultiSummary(id){
  const el=$(id), vals=selected(id), sum=el.querySelector('summary');
  const label=id==='venues'?'venue':id==='distance'?'distance':id==='raceCode'?'race code':id==='raceCategory'?'category':'grade';
  sum.textContent=vals.length===0?`Any ${label}`:vals.length<=2?vals.join(', '):`${vals.length} selected`;
 }
+
 function setMultiOptions(id,items){
  const el=$(id), keep=new Set(selected(id)), box=el.querySelector('.multi-options');
  box.innerHTML=items.map(z=>`<label class="check-option"><input type="checkbox" value="${esc(z)}"${keep.has(z)?' checked':''}> ${esc(z)}</label>`).join('');
  box.querySelectorAll('input').forEach(x=>x.addEventListener('change',()=>updateMultiSummary(id)));
  updateMultiSummary(id);
 }
+
 const cs=()=>[...document.querySelectorAll('.countries input:checked')].map(x=>x.value);
-let t=new Date(),f=new Date();f.setMonth(f.getMonth()-1);$('to').value=t.toISOString().slice(0,10);$('from').value=f.toISOString().slice(0,10);
-async function jf(url,opt={}){let r=await fetch(url,opt),txt=await r.text(),j;try{j=JSON.parse(txt)}catch{throw Error(txt||`HTTP ${r.status}`)}if(!r.ok)throw Error(j.detail||j.error||`HTTP ${r.status}`);return j}
-fetch('/api/health').then(r=>r.json()).then(x=>$('health').textContent=x.r2?`● R2 online · ${x.workers} workers`:'● Storage unavailable');
-document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{document.querySelectorAll('.tab,.panel').forEach(x=>x.classList.remove('active'));b.classList.add('active');$(b.dataset.tab).classList.add('active')});
-const optNum=id=>v(id)===''?null:+v(id),optBool=id=>v(id)===''?null:v(id)==='true';
-function body(){return{from_date:v('from'),to_date:v('to'),countries:cs(),plan:v('plan'),strategy:v('strategy'),nth:+v('nth'),min_odds:+v('minOdds'),max_odds:+v('maxOdds'),min_runners:+v('minRunners'),max_runners:+v('maxRunners'),stake_mode:v('stakeMode'),amount:+v('amount'),commission:+v('commission'),venues:selected('venues'),race_codes:selected('raceCode'),distances:selected('distance'),handicap_status:v('handicap')||null,race_categories:selected('raceCategory'),race_grades:selected('raceGrade'),days_of_week:[...document.querySelectorAll('#days input:checked')].map(x=>+x.value),months_of_year:[...document.querySelectorAll('#months input:checked')].map(x=>+x.value),time_from:v('timeFrom')||null,time_to:v('timeTo')||null,fav_min_bsp:optNum('favMin'),fav_max_bsp:optNum('favMax'),second_min_bsp:optNum('secondMin'),second_max_bsp:optNum('secondMax'),fav_gap_min:optNum('gapMin'),fav_gap_max:optNum('gapMax'),overround_min:optNum('overMin'),overround_max:optNum('overMax'),number_of_winners:optNum('numWinners'),in_play_enabled:optBool('inPlay'),bet_delay:optNum('betDelay'),betting_type:v('bettingType')||null,market_base_rate_min:optNum('baseMin'),market_base_rate_max:optNum('baseMax'),cross_matching:optBool('crossMatching'),discount_allowed:optBool('discountAllowed'),persistence_enabled:optBool('persistenceEnabled'),selected_ltp_min:optNum('ltpMin'),selected_ltp_max:optNum('ltpMax'),selected_adjustment_min:optNum('adjMin'),selected_adjustment_max:optNum('adjMax'),selected_sort_priority_min:optNum('sortMin'),selected_sort_priority_max:optNum('sortMax')}}
-$('run').onclick=async()=>{if(!cs().length)return alert('Select at least one country.');try{$('run').disabled=true;$('cached').classList.add('hide');$('job').classList.remove('hide');$('jobmsg').textContent='Submitting backtest…';let j=await jf('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body())});$('jobid').textContent='Job '+j.job_id;poll(j.job_id)}catch(e){fail(e.message)}};
-async function poll(id){clearTimeout(timer);try{let j=await jf('/api/jobs/'+id);$('jobmsg').textContent=j.message||j.status;$('pct').textContent=(j.progress||0)+'%';$('bar').style.width=(j.progress||0)+'%';if(j.status==='complete'){render(await jf('/api/jobs/'+id+'/result'),j);$('run').disabled=false;loadHistory();return}if(j.status==='failed'){fail(j.message);return}timer=setTimeout(()=>poll(id),900)}catch(e){fail(e.message)}}
-function fail(m){$('jobmsg').innerHTML='<span class="error">'+esc(m)+'</span>';$('title').textContent='Backtest could not complete';$('sub').textContent=m;$('run').disabled=false}
-const money=x=>'£'+Number(x||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}),esc=s=>String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
-function render(r,j){let s=r.stats;$('title').textContent='Backtest complete';$('sub').textContent=`${r.request.from_date} → ${r.request.to_date} · ${r.request.countries.join(', ')} · ${r.request.strategy}`;$('cached').classList.toggle('hide',!j.cached);$('betsM').textContent=s.bets.toLocaleString();$('strikeM').textContent=s.strike.toFixed(2)+'%';$('netM').textContent=money(s.net);$('roiM').textContent=s.stake_roi.toFixed(2)+'%';$('ddM').textContent=money(s.max_drawdown);$('bspM').textContent=s.avg_bsp.toFixed(2);$('bandrows').innerHTML=r.bands.map(x=>`<tr><td>${x.band}</td><td>${x.bets}</td><td>${x.wins}</td><td>${x.strike.toFixed(2)}%</td><td>${money(x.gross)}</td><td>${money(x.net)}</td><td>${x.roi.toFixed(2)}%</td></tr>`).join('');$('betrows').innerHTML=r.bets.map(x=>`<tr><td>${esc(x.market_time)}</td><td>${esc(x.country)}</td><td>${esc(x.event_name)}</td><td>${esc(x.horse)}</td><td>${x.bsp.toFixed(2)}</td><td>${x.bet_type}</td><td>${x.won?'WIN':'LOSS'}</td><td>${money(x.net)}</td></tr>`).join('');$('trunc').textContent=r.bets_truncated?`Showing first ${r.bets.length.toLocaleString()} of ${r.total_bets.toLocaleString()} bets.`:'';$('detailgrid').innerHTML=[['Job ID',j.job_id],['Result cache',j.cached?'Persistent cache hit':'New calculation'],['Markets found',r.markets_found],['Markets skipped',r.skipped],['Elapsed',r.elapsed_seconds+' sec'],['Engine',r.engine_version]].map(x=>`<div><span>${x[0]}</span><b>${esc(x[1])}</b></div>`).join('');draw(r.graph_points||[],s.equity)}
-let chartState={points:[],plot:[],left:76,right:22,top:22,bottom:58};
-function fmtDate(v,full=false){let d=new Date(v);if(isNaN(d))return v||'';return d.toLocaleString(undefined,full?{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}:{day:'2-digit',month:'short',year:'2-digit'})}
-function niceStep(range,target=5){let rough=Math.max(range/target,.01),p=Math.pow(10,Math.floor(Math.log10(rough))),n=rough/p;return (n<=1?1:n<=2?2:n<=5?5:10)*p}
+
+let t=new Date(),f=new Date();
+f.setMonth(f.getMonth()-1);
+$('to').value=t.toISOString().slice(0,10);
+$('from').value=f.toISOString().slice(0,10);
+
+async function jf(url,opt={}){
+ let r=await fetch(url,opt),txt=await r.text(),j;
+ try{j=JSON.parse(txt)}
+ catch{throw Error(txt||`HTTP ${r.status}`)}
+ if(!r.ok)throw Error(j.detail||j.error||`HTTP ${r.status}`);
+ return j
+}
+
+fetch('/api/health')
+ .then(r=>r.json())
+ .then(x=>$('health').textContent=x.r2?`● R2 online · ${x.workers} workers`:'● Storage unavailable');
+
+document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{
+ document.querySelectorAll('.tab,.panel').forEach(x=>x.classList.remove('active'));
+ b.classList.add('active');
+ $(b.dataset.tab).classList.add('active')
+});
+
+const optNum=id=>v(id)===''?null:+v(id);
+const optBool=id=>v(id)===''?null:v(id)==='true';
+
+
+/* =========================================================
+   HORSE ODDS FILTER
+   ========================================================= */
+
+function horseOdds(){
+ const mode=v('oddsFilter');
+ const a=optNum('oddsValue1');
+ const b=optNum('oddsValue2');
+
+ if(mode==='over'){
+  return {
+   min:a??1.01,
+   max:1000
+  };
+ }
+
+ if(mode==='under'){
+  return {
+   min:1.01,
+   max:a??1000
+  };
+ }
+
+ if(mode==='between'){
+  return {
+   min:a??1.01,
+   max:b??1000
+  };
+ }
+
+ return {
+  min:1.01,
+  max:1000
+ };
+}
+
+function updateOddsFilter(){
+ const mode=v('oddsFilter');
+ const box=$('oddsValues');
+ const l1=$('oddsValue1Label');
+ const l2=$('oddsValue2Label');
+
+ if(mode==='any'){
+  box.style.display='none';
+  return;
+ }
+
+ box.style.display='grid';
+ l1.style.display='';
+
+ if(mode==='over'){
+  l1.childNodes[0].nodeValue='Odds over ';
+  l2.style.display='none';
+ }
+ else if(mode==='under'){
+  l1.childNodes[0].nodeValue='Odds under ';
+  l2.style.display='none';
+ }
+ else{
+  l1.childNodes[0].nodeValue='Minimum odds ';
+  l2.childNodes[0].nodeValue='Maximum odds ';
+  l2.style.display='';
+ }
+}
+
+
+/* =========================================================
+   BUILD BACKTEST REQUEST
+   ========================================================= */
+
+function body(){
+ const odds=horseOdds();
+
+ return{
+  from_date:v('from'),
+  to_date:v('to'),
+  countries:cs(),
+
+  // Kept internally for backend compatibility.
+  // The Data Plan selector has been removed from the page.
+  plan:'Basic Plan',
+
+  strategy:v('strategy'),
+  nth:+v('nth'),
+
+  min_odds:odds.min,
+  max_odds:odds.max,
+
+  min_runners:+v('minRunners'),
+  max_runners:+v('maxRunners'),
+
+  stake_mode:v('stakeMode'),
+  amount:+v('amount'),
+  commission:+v('commission'),
+
+  venues:selected('venues'),
+  race_codes:selected('raceCode'),
+  distances:selected('distance'),
+
+  handicap_status:v('handicap')||null,
+  race_categories:selected('raceCategory'),
+  race_grades:selected('raceGrade'),
+
+  days_of_week:[
+   ...document.querySelectorAll('#days input:checked')
+  ].map(x=>+x.value),
+
+  months_of_year:[
+   ...document.querySelectorAll('#months input:checked')
+  ].map(x=>+x.value),
+
+  time_from:v('timeFrom')||null,
+  time_to:v('timeTo')||null,
+
+  fav_min_bsp:optNum('favMin'),
+  fav_max_bsp:optNum('favMax'),
+
+  second_min_bsp:optNum('secondMin'),
+  second_max_bsp:optNum('secondMax'),
+
+  fav_gap_min:optNum('gapMin'),
+  fav_gap_max:optNum('gapMax'),
+
+  overround_min:optNum('overMin'),
+  overround_max:optNum('overMax'),
+
+  number_of_winners:optNum('numWinners'),
+  in_play_enabled:optBool('inPlay'),
+  bet_delay:optNum('betDelay'),
+
+  betting_type:v('bettingType')||null,
+
+  market_base_rate_min:optNum('baseMin'),
+  market_base_rate_max:optNum('baseMax'),
+
+  cross_matching:optBool('crossMatching'),
+  discount_allowed:optBool('discountAllowed'),
+  persistence_enabled:optBool('persistenceEnabled'),
+
+  selected_ltp_min:optNum('ltpMin'),
+  selected_ltp_max:optNum('ltpMax'),
+
+  selected_adjustment_min:optNum('adjMin'),
+  selected_adjustment_max:optNum('adjMax'),
+
+  selected_sort_priority_min:optNum('sortMin'),
+  selected_sort_priority_max:optNum('sortMax')
+ };
+}
+
+
+/* =========================================================
+   RUN BACKTEST
+   ========================================================= */
+
+$('run').onclick=async()=>{
+ if(!cs().length){
+  return alert('Select at least one country.');
+ }
+
+ try{
+  $('run').disabled=true;
+  $('cached').classList.add('hide');
+  $('job').classList.remove('hide');
+  $('jobmsg').textContent='Submitting backtest…';
+
+  let j=await jf('/api/jobs',{
+   method:'POST',
+   headers:{
+    'Content-Type':'application/json'
+   },
+   body:JSON.stringify(body())
+  });
+
+  $('jobid').textContent='Job '+j.job_id;
+
+  poll(j.job_id);
+
+ }catch(e){
+  fail(e.message);
+ }
+};
+
+
+async function poll(id){
+ clearTimeout(timer);
+
+ try{
+  let j=await jf('/api/jobs/'+id);
+
+  $('jobmsg').textContent=j.message||j.status;
+  $('pct').textContent=(j.progress||0)+'%';
+  $('bar').style.width=(j.progress||0)+'%';
+
+  if(j.status==='complete'){
+   render(
+    await jf('/api/jobs/'+id+'/result'),
+    j
+   );
+
+   $('run').disabled=false;
+   loadHistory();
+   return;
+  }
+
+  if(j.status==='failed'){
+   fail(j.message);
+   return;
+  }
+
+  timer=setTimeout(()=>poll(id),900);
+
+ }catch(e){
+  fail(e.message);
+ }
+}
+
+
+function fail(m){
+ $('jobmsg').innerHTML=
+  '<span class="error">'+esc(m)+'</span>';
+
+ $('title').textContent=
+  'Backtest could not complete';
+
+ $('sub').textContent=m;
+
+ $('run').disabled=false;
+}
+
+
+/* =========================================================
+   FORMATTING
+   ========================================================= */
+
+const money=x=>
+ '£'+Number(x||0).toLocaleString(
+  undefined,
+  {
+   minimumFractionDigits:2,
+   maximumFractionDigits:2
+  }
+ );
+
+const esc=s=>String(s).replace(
+ /[&<>"']/g,
+ m=>({
+  '&':'&amp;',
+  '<':'&lt;',
+  '>':'&gt;',
+  '"':'&quot;',
+  "'":'&#039;'
+ }[m])
+);
+
+
+/* =========================================================
+   RESULTS
+   ========================================================= */
+
+function render(r,j){
+ let s=r.stats;
+
+ $('title').textContent='Backtest complete';
+
+ $('sub').textContent=
+  `${r.request.from_date} → ${r.request.to_date} · ${r.request.countries.join(', ')} · ${r.request.strategy}`;
+
+ $('cached').classList.toggle(
+  'hide',
+  !j.cached
+ );
+
+ $('betsM').textContent=
+  s.bets.toLocaleString();
+
+ $('strikeM').textContent=
+  s.strike.toFixed(2)+'%';
+
+ $('netM').textContent=
+  money(s.net);
+
+ $('roiM').textContent=
+  s.stake_roi.toFixed(2)+'%';
+
+ $('ddM').textContent=
+  money(s.max_drawdown);
+
+ $('bspM').textContent=
+  s.avg_bsp.toFixed(2);
+
+ $('bandrows').innerHTML=
+  r.bands.map(x=>`
+   <tr>
+    <td>${x.band}</td>
+    <td>${x.bets}</td>
+    <td>${x.wins}</td>
+    <td>${x.strike.toFixed(2)}%</td>
+    <td>${money(x.gross)}</td>
+    <td>${money(x.net)}</td>
+    <td>${x.roi.toFixed(2)}%</td>
+   </tr>
+  `).join('');
+
+ $('betrows').innerHTML=
+  r.bets.map(x=>`
+   <tr>
+    <td>${esc(x.market_time)}</td>
+    <td>${esc(x.country)}</td>
+    <td>${esc(x.event_name)}</td>
+    <td>${esc(x.horse)}</td>
+    <td>${x.bsp.toFixed(2)}</td>
+    <td>${x.bet_type}</td>
+    <td>${x.won?'WIN':'LOSS'}</td>
+    <td>${money(x.net)}</td>
+   </tr>
+  `).join('');
+
+ $('trunc').textContent=
+  r.bets_truncated
+   ?`Showing first ${r.bets.length.toLocaleString()} of ${r.total_bets.toLocaleString()} bets.`
+   :'';
+
+ $('detailgrid').innerHTML=[
+  ['Job ID',j.job_id],
+  [
+   'Result cache',
+   j.cached
+    ?'Persistent cache hit'
+    :'New calculation'
+  ],
+  ['Markets found',r.markets_found],
+  ['Markets skipped',r.skipped],
+  ['Elapsed',r.elapsed_seconds+' sec'],
+  ['Engine',r.engine_version]
+ ].map(x=>`
+  <div>
+   <span>${x[0]}</span>
+   <b>${esc(x[1])}</b>
+  </div>
+ `).join('');
+
+ draw(
+  r.graph_points||[],
+  s.equity
+ );
+}
+
+
+/* =========================================================
+   PROFIT GRAPH
+   ========================================================= */
+
+let chartState={
+ points:[],
+ plot:[],
+ left:76,
+ right:22,
+ top:22,
+ bottom:58
+};
+
+
+function fmtDate(v,full=false){
+ let d=new Date(v);
+
+ if(isNaN(d)){
+  return v||'';
+ }
+
+ return d.toLocaleString(
+  undefined,
+  full
+   ?{
+     day:'2-digit',
+     month:'short',
+     year:'numeric',
+     hour:'2-digit',
+     minute:'2-digit'
+    }
+   :{
+     day:'2-digit',
+     month:'short',
+     year:'2-digit'
+    }
+ );
+}
+
+
+function niceStep(range,target=5){
+ let rough=Math.max(range/target,.01);
+ let p=Math.pow(
+  10,
+  Math.floor(Math.log10(rough))
+ );
+ let n=rough/p;
+
+ return(
+  n<=1?1:
+  n<=2?2:
+  n<=5?5:
+  10
+ )*p;
+}
+
+
 function draw(points,legacy=[]){
- let c=$('chart'),ctx=c.getContext('2d'),d=devicePixelRatio||1,w=c.clientWidth,h=c.clientHeight;
- c.width=w*d;c.height=h*d;ctx.setTransform(d,0,0,d,0,0);ctx.clearRect(0,0,w,h);
- let data=points.length?points:legacy.map((v,i)=>({market_time:String(i+1),cumulative:v,event_name:'',horse:'',bsp:0,bet_net:0}));
- $('empty').style.display=data.length?'none':'block';if(!data.length)return;
- let L=chartState.left,R=chartState.right,T=chartState.top,B=chartState.bottom,pw=Math.max(10,w-L-R),ph=Math.max(10,h-T-B);
- let vals=[0,...data.map(x=>Number(x.cumulative)||0)],mn=Math.min(...vals),mx=Math.max(...vals),pad=(mx-mn)*.08||1;mn-=pad;mx+=pad;
- let step=niceStep(mx-mn),y0=Math.floor(mn/step)*step,y1=Math.ceil(mx/step)*step;
- ctx.font='12px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';ctx.textBaseline='middle';
- ctx.strokeStyle='#e6ebf0';ctx.fillStyle='#718096';ctx.lineWidth=1;
- for(let yv=y0;yv<=y1+step*.1;yv+=step){let y=T+ph*(y1-yv)/(y1-y0);ctx.beginPath();ctx.moveTo(L,y);ctx.lineTo(w-R,y);ctx.stroke();ctx.textAlign='right';ctx.fillText(money(yv),L-10,y)}
- ctx.save();ctx.translate(18,T+ph/2);ctx.rotate(-Math.PI/2);ctx.textAlign='center';ctx.fillStyle='#52606d';ctx.fillText('Cumulative profit / loss (£)',0,0);ctx.restore();
- let n=data.length,ticks=Math.min(6,n),idxs=[...new Set(Array.from({length:ticks},(_,k)=>Math.round(k*(n-1)/Math.max(1,ticks-1))))];
- ctx.textAlign='center';ctx.textBaseline='top';ctx.fillStyle='#718096';
- idxs.forEach(i=>{let x=L+pw*i/Math.max(1,n-1);ctx.strokeStyle='#e6ebf0';ctx.beginPath();ctx.moveTo(x,T);ctx.lineTo(x,T+ph);ctx.stroke();ctx.fillText(fmtDate(data[i].market_time),x,T+ph+9)});
- ctx.fillStyle='#52606d';ctx.fillText('Race date / time',L+pw/2,h-18);
- chartState.plot=data.map((p,i)=>({x:L+pw*i/Math.max(1,n-1),y:T+ph*(y1-(Number(p.cumulative)||0))/(y1-y0),p}));
- ctx.strokeStyle='#2463eb';ctx.lineWidth=2;ctx.beginPath();chartState.plot.forEach((q,i)=>i?ctx.lineTo(q.x,q.y):ctx.moveTo(q.x,q.y));ctx.stroke();
+ let c=$('chart');
+ let ctx=c.getContext('2d');
+ let d=devicePixelRatio||1;
+ let w=c.clientWidth;
+ let h=c.clientHeight;
+
+ c.width=w*d;
+ c.height=h*d;
+
+ ctx.setTransform(
+  d,0,0,d,0,0
+ );
+
+ ctx.clearRect(
+  0,0,w,h
+ );
+
+ let data=points.length
+  ?points
+  :legacy.map((v,i)=>({
+    market_time:String(i+1),
+    cumulative:v,
+    event_name:'',
+    horse:'',
+    bsp:0,
+    bet_net:0
+   }));
+
+ $('empty').style.display=
+  data.length?'none':'block';
+
+ if(!data.length){
+  return;
+ }
+
+ let L=chartState.left;
+ let R=chartState.right;
+ let T=chartState.top;
+ let B=chartState.bottom;
+
+ let pw=Math.max(
+  10,
+  w-L-R
+ );
+
+ let ph=Math.max(
+  10,
+  h-T-B
+ );
+
+ let vals=[
+  0,
+  ...data.map(
+   x=>Number(x.cumulative)||0
+  )
+ ];
+
+ let mn=Math.min(...vals);
+ let mx=Math.max(...vals);
+
+ let pad=
+  (mx-mn)*.08||1;
+
+ mn-=pad;
+ mx+=pad;
+
+ let step=niceStep(mx-mn);
+
+ let y0=
+  Math.floor(mn/step)*step;
+
+ let y1=
+  Math.ceil(mx/step)*step;
+
+ ctx.font=
+  '12px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
+
+ ctx.textBaseline='middle';
+
+ ctx.strokeStyle='#e6ebf0';
+ ctx.fillStyle='#718096';
+ ctx.lineWidth=1;
+
+ for(
+  let yv=y0;
+  yv<=y1+step*.1;
+  yv+=step
+ ){
+  let y=
+   T+ph*(y1-yv)/(y1-y0);
+
+  ctx.beginPath();
+  ctx.moveTo(L,y);
+  ctx.lineTo(w-R,y);
+  ctx.stroke();
+
+  ctx.textAlign='right';
+
+  ctx.fillText(
+   money(yv),
+   L-10,
+   y
+  );
+ }
+
+ ctx.save();
+
+ ctx.translate(
+  18,
+  T+ph/2
+ );
+
+ ctx.rotate(
+  -Math.PI/2
+ );
+
+ ctx.textAlign='center';
+ ctx.fillStyle='#52606d';
+
+ ctx.fillText(
+  'Cumulative profit / loss (£)',
+  0,
+  0
+ );
+
+ ctx.restore();
+
+ let n=data.length;
+ let ticks=Math.min(6,n);
+
+ let idxs=[
+  ...new Set(
+   Array.from(
+    {length:ticks},
+    (_,k)=>
+     Math.round(
+      k*(n-1)/
+      Math.max(1,ticks-1)
+     )
+   )
+  )
+ ];
+
+ ctx.textAlign='center';
+ ctx.textBaseline='top';
+ ctx.fillStyle='#718096';
+
+ idxs.forEach(i=>{
+  let x=
+   L+pw*i/
+   Math.max(1,n-1);
+
+  ctx.strokeStyle='#e6ebf0';
+
+  ctx.beginPath();
+  ctx.moveTo(x,T);
+  ctx.lineTo(x,T+ph);
+  ctx.stroke();
+
+  ctx.fillText(
+   fmtDate(
+    data[i].market_time
+   ),
+   x,
+   T+ph+9
+  );
+ });
+
+ ctx.fillStyle='#52606d';
+
+ ctx.fillText(
+  'Race date / time',
+  L+pw/2,
+  h-18
+ );
+
+ chartState.plot=
+  data.map((p,i)=>({
+   x:L+pw*i/
+    Math.max(1,n-1),
+
+   y:T+ph*
+    (
+     y1-
+     (Number(p.cumulative)||0)
+    )/
+    (y1-y0),
+
+   p
+  }));
+
+ ctx.strokeStyle='#2463eb';
+ ctx.lineWidth=2;
+
+ ctx.beginPath();
+
+ chartState.plot.forEach(
+  (q,i)=>
+   i
+    ?ctx.lineTo(q.x,q.y)
+    :ctx.moveTo(q.x,q.y)
+ );
+
+ ctx.stroke();
+
  chartState.points=data;
 }
-function chartHover(ev){
- let c=$('chart');if(!chartState.plot.length)return;let r=c.getBoundingClientRect(),mx=ev.clientX-r.left;
- let q=chartState.plot.reduce((a,b)=>Math.abs(b.x-mx)<Math.abs(a.x-mx)?b:a),p=q.p;
- let tip=$('charttip');if(!tip){tip=document.createElement('div');tip.id='charttip';tip.className='charttip';c.parentElement.appendChild(tip)}
- tip.innerHTML=`<b>${esc(fmtDate(p.market_time,true))}</b><span>${esc(p.event_name||'')}</span><span>${esc(p.horse||'')} · BSP ${Number(p.bsp||0).toFixed(2)} · ${esc(p.bet_type||'')}</span><span>Bet P/L: <b>${money(p.bet_net)}</b></span><span>Cumulative P/L: <b>${money(p.cumulative)}</b></span>`;
- tip.style.display='block';let x=Math.min(Math.max(q.x+14,8),r.width-230),y=Math.max(8,q.y-78);tip.style.left=x+'px';tip.style.top=y+'px';
-}
-$('chart').addEventListener('mousemove',chartHover);$('chart').addEventListener('mouseleave',()=>{let t=$('charttip');if(t)t.style.display='none'});
-window.addEventListener('resize',()=>{if(chartState.points.length)draw(chartState.points)});
 
+
+function chartHover(ev){
+ let c=$('chart');
+
+ if(!chartState.plot.length){
+  return;
+ }
+
+ let r=c.getBoundingClientRect();
+ let mx=ev.clientX-r.left;
+
+ let q=chartState.plot.reduce(
+  (a,b)=>
+   Math.abs(b.x-mx)<
+   Math.abs(a.x-mx)
+    ?b
+    :a
+ );
+
+ let p=q.p;
+
+ let tip=$('charttip');
+
+ if(!tip){
+  tip=document.createElement('div');
+  tip.id='charttip';
+  tip.className='charttip';
+
+  c.parentElement.appendChild(
+   tip
+  );
+ }
+
+ tip.innerHTML=`
+  <b>${esc(fmtDate(p.market_time,true))}</b>
+  <span>${esc(p.event_name||'')}</span>
+  <span>
+   ${esc(p.horse||'')}
+   · BSP ${Number(p.bsp||0).toFixed(2)}
+   · ${esc(p.bet_type||'')}
+  </span>
+  <span>
+   Bet P/L:
+   <b>${money(p.bet_net)}</b>
+  </span>
+  <span>
+   Cumulative P/L:
+   <b>${money(p.cumulative)}</b>
+  </span>
+ `;
+
+ tip.style.display='block';
+
+ let x=Math.min(
+  Math.max(q.x+14,8),
+  r.width-230
+ );
+
+ let y=Math.max(
+  8,
+  q.y-78
+ );
+
+ tip.style.left=x+'px';
+ tip.style.top=y+'px';
+}
+
+
+$('chart').addEventListener(
+ 'mousemove',
+ chartHover
+);
+
+$('chart').addEventListener(
+ 'mouseleave',
+ ()=>{
+  let t=$('charttip');
+  if(t)t.style.display='none';
+ }
+);
+
+window.addEventListener(
+ 'resize',
+ ()=>{
+  if(chartState.points.length){
+   draw(chartState.points);
+  }
+ }
+);
+
+
+/* =========================================================
+   MULTI SELECT FILTERS
+   ========================================================= */
 
 function initMultiDropdowns(){
- ['venues','distance','raceCode','raceCategory','raceGrade'].forEach(id=>{
-   const el=$(id); if(!el)return;
-   el.querySelectorAll('.multi-options input').forEach(x=>x.addEventListener('change',()=>updateMultiSummary(id)));
-   const clear=el.querySelector('.clear-multi');
-   if(clear)clear.onclick=e=>{e.preventDefault();el.querySelectorAll('.multi-options input').forEach(x=>x.checked=false);updateMultiSummary(id)};
-   updateMultiSummary(id);
+ [
+  'venues',
+  'distance',
+  'raceCode',
+  'raceCategory',
+  'raceGrade'
+ ].forEach(id=>{
+
+  const el=$(id);
+
+  if(!el)return;
+
+  el.querySelectorAll(
+   '.multi-options input'
+  ).forEach(
+   x=>x.addEventListener(
+    'change',
+    ()=>updateMultiSummary(id)
+   )
+  );
+
+  const clear=
+   el.querySelector(
+    '.clear-multi'
+   );
+
+  if(clear){
+   clear.onclick=e=>{
+    e.preventDefault();
+
+    el.querySelectorAll(
+     '.multi-options input'
+    ).forEach(
+     x=>x.checked=false
+    );
+
+    updateMultiSummary(id);
+   };
+  }
+
+  updateMultiSummary(id);
  });
 }
+
+
+/* =========================================================
+   SAVED BACKTESTS
+   ========================================================= */
+
 async function loadHistory(){
- const tbody=$('historyRows'); if(!tbody)return;
+ const tbody=$('historyRows');
+
+ if(!tbody)return;
+
  try{
-  const x=await jf('/api/public-runs?limit=250');
-  if(!x.runs.length){tbody.innerHTML='<tr><td colspan="7">No completed backtests saved yet.</td></tr>';return}
-  tbody.innerHTML=x.runs.map(r=>`<tr class="history-run" data-run="${esc(r.run_id)}">
-   <td><b>${Number(r.roi||0).toFixed(2)}%</b></td><td>${money(r.net)}</td><td>${Number(r.bets||0).toLocaleString()}</td>
-   <td>${esc(r.strategy||'')}</td><td>${esc(r.from_date||'')} → ${esc(r.to_date||'')}</td>
-   <td>${esc((r.countries||[]).join(', '))}</td><td>${esc((r.created_at||'').replace('T',' ').slice(0,16))}</td></tr>`).join('');
-  tbody.querySelectorAll('.history-run').forEach(tr=>tr.onclick=()=>loadSavedRun(tr.dataset.run));
- }catch(e){tbody.innerHTML=`<tr><td colspan="7" class="error">${esc(e.message)}</td></tr>`}
+  const x=
+   await jf(
+    '/api/public-runs?limit=250'
+   );
+
+  if(!x.runs.length){
+   tbody.innerHTML=
+    '<tr><td colspan="7">No completed backtests saved yet.</td></tr>';
+
+   return;
+  }
+
+  tbody.innerHTML=
+   x.runs.map(r=>`
+    <tr
+     class="history-run"
+     data-run="${esc(r.run_id)}"
+    >
+     <td>
+      <b>
+       ${Number(r.roi||0).toFixed(2)}%
+      </b>
+     </td>
+
+     <td>
+      ${money(r.net)}
+     </td>
+
+     <td>
+      ${Number(r.bets||0).toLocaleString()}
+     </td>
+
+     <td>
+      ${esc(r.strategy||'')}
+     </td>
+
+     <td>
+      ${esc(r.from_date||'')}
+      →
+      ${esc(r.to_date||'')}
+     </td>
+
+     <td>
+      ${esc(
+       (r.countries||[])
+        .join(', ')
+      )}
+     </td>
+
+     <td>
+      ${esc(
+       (r.created_at||'')
+        .replace('T',' ')
+        .slice(0,16)
+      )}
+     </td>
+    </tr>
+   `).join('');
+
+  tbody
+   .querySelectorAll(
+    '.history-run'
+   )
+   .forEach(
+    tr=>
+     tr.onclick=
+      ()=>loadSavedRun(
+       tr.dataset.run
+      )
+   );
+
+ }catch(e){
+  tbody.innerHTML=
+   `<tr>
+     <td
+      colspan="7"
+      class="error"
+     >
+      ${esc(e.message)}
+     </td>
+    </tr>`;
+ }
 }
+
+
 async function loadSavedRun(runId){
  try{
-  const x=await jf('/api/public-runs/'+encodeURIComponent(runId)+'/result');
-  const run=x.run,result=x.result;
-  render(result,{job_id:run.job_id||run.run_id,cached:!!run.cached});
-  window.scrollTo({top:0,behavior:'smooth'});
- }catch(e){alert(e.message)}
-}
-document.addEventListener('DOMContentLoaded',()=>{initMultiDropdowns();loadHistory()});
-$('refreshHistory').addEventListener('click',loadHistory);
+  const x=
+   await jf(
+    '/api/public-runs/'+
+    encodeURIComponent(runId)+
+    '/result'
+   );
 
-$('refreshHistory').addEventListener('click',loadHistory);
+  const run=x.run;
+  const result=x.result;
+
+  render(
+   result,
+   {
+    job_id:
+     run.job_id||
+     run.run_id,
+
+    cached:
+     !!run.cached
+   }
+  );
+
+  window.scrollTo({
+   top:0,
+   behavior:'smooth'
+  });
+
+ }catch(e){
+  alert(e.message);
+ }
+}
+
+
+/* =========================================================
+   STARTUP
+   ========================================================= */
+
+document.addEventListener(
+ 'DOMContentLoaded',
+ ()=>{
+  initMultiDropdowns();
+
+  updateOddsFilter();
+
+  $('oddsFilter')
+   .addEventListener(
+    'change',
+    updateOddsFilter
+   );
+
+  loadHistory();
+ }
+);
+
+$('refreshHistory')
+ .addEventListener(
+  'click',
+  loadHistory
+ );
