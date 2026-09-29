@@ -13,7 +13,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel,Field
 from starlette.middleware.sessions import SessionMiddleware
 
-ENGINE="public-web-v5-duckdb-prestart-ltp"; ROOT=Path(os.getenv("BETFAIR_WEB_CACHE",Path.home()/".betfair-public-web-cache"));ROOT.mkdir(parents=True,exist_ok=True)
+ENGINE="public-web-v5.1-duckdb-streaming"; ROOT=Path(os.getenv("BETFAIR_WEB_CACHE",Path.home()/".betfair-public-web-cache"));ROOT.mkdir(parents=True,exist_ok=True)
 WORKERS=max(1,int(os.getenv("BACKTEST_WORKERS","1")))
 MAX_BETS=max(100,int(os.getenv("MAX_BETS_RETURNED","5000")))
 DB_PATH=Path(os.getenv("BETFAIR_DUCKDB_PATH",str(ROOT/"betfair.duckdb")))
@@ -309,11 +309,12 @@ def normalized_time(v):
         return d.replace(tzinfo=timezone.utc) if d.tzinfo is None else d.astimezone(timezone.utc)
     except (TypeError,ValueError):return None
 
-def load_historical_markets(q,progress=None):
+def iter_historical_markets(q,progress=None):
+    """Stream one market at a time from DuckDB so long backtests stay within Render RAM."""
     path=ensure_compact_db()
     if progress:progress(10,"Opening compact historical database…")
     wanted=sorted({str(x).upper() for x in q.countries})
-    if not wanted:return []
+    if not wanted:return
     placeholders=",".join("?" for _ in wanted)
     start=datetime.combine(q.from_date,datetime.min.time())
     end=datetime.combine(q.to_date+timedelta(days=1),datetime.min.time())
@@ -329,34 +330,36 @@ def load_historical_markets(q,progress=None):
         ORDER BY market_time,market_id,sort_priority NULLS LAST,selection_id
     """
     con=duckdb.connect(str(path),read_only=True)
-    output=[];current_mid=None;race_meta=None;rs=[];rows_seen=0
-    def finish_market():
-        nonlocal rs,race_meta,current_mid
-        if current_mid is None or race_meta is None:return
-        if len(rs)>=2 and sum(x.winner for x in rs)==1:
-            mid,mt,country,venue,race_name,event_name,distance=race_meta
-            dt=normalized_time(mt)
-            output.append(Market(str(mid),dt.isoformat() if dt else str(mt),str(event_name or race_name or ""),str(country or "").upper(),rs,venue=str(venue or ""),distance=str(distance or "")))
+    current_mid=None;race_meta=None;rs=[];rows_seen=0;markets_seen=0
     try:
         cur=con.execute(sql,[start,end,*wanted])
         while True:
-            batch=cur.fetchmany(10000)
+            batch=cur.fetchmany(5000)
             if not batch:break
             for row in batch:
                 mid=str(row[0] or "")
                 if current_mid is not None and mid!=current_mid:
-                    finish_market();rs=[]
+                    if race_meta is not None and len(rs)>=2 and sum(x.winner for x in rs)==1:
+                        m0,mt,country,venue,race_name,event_name,distance=race_meta
+                        dt=normalized_time(mt)
+                        markets_seen+=1
+                        yield Market(str(m0),dt.isoformat() if dt else str(mt),str(event_name or race_name or ""),str(country or "").upper(),rs,venue=str(venue or ""),distance=str(distance or ""))
+                    rs=[]
                 if mid!=current_mid:
                     current_mid=mid;race_meta=row[:7]
                 sid=row[7];status=str(row[9] or "").upper();price=safe_float(row[12]);priority=row[10]
                 if sid is None or price is None:continue
                 rs.append(Runner(int(sid),str(row[8] or f"Selection {sid}"),price,status=="WINNER",safe_float(row[11]),int(priority) if priority is not None else None,status,price))
                 rows_seen+=1
-            if progress:progress(min(90,10+int(rows_seen/10000)),f"Loaded {rows_seen:,} runner rows from compact database…")
-        finish_market()
-    finally:con.close()
-    if progress:progress(94,f"Loaded {len(output):,} eligible races from compact database…")
-    return output
+            if progress and rows_seen%25000<5000:
+                progress(50,f"Streaming historical data… {rows_seen:,} runner rows read, {markets_seen:,} races processed")
+        if current_mid is not None and race_meta is not None and len(rs)>=2 and sum(x.winner for x in rs)==1:
+            m0,mt,country,venue,race_name,event_name,distance=race_meta
+            dt=normalized_time(mt);markets_seen+=1
+            yield Market(str(m0),dt.isoformat() if dt else str(mt),str(event_name or race_name or ""),str(country or "").upper(),rs,venue=str(venue or ""),distance=str(distance or ""))
+    finally:
+        con.close()
+    if progress:progress(94,f"Processed {markets_seen:,} eligible races from compact database…")
 
 def between(v,lo,hi):
     if lo is None and hi is None:return True
@@ -399,9 +402,9 @@ def work(j,qd,h,run_id):
     r=R2();q=Req(**qd);t=time.time()
     try:
         upd(r,j,status="running",progress=2,message="Querying compact DuckDB historical database…")
-        markets=load_historical_markets(q,lambda pct,msg:upd(r,j,status="running",progress=pct,message=msg))
-        bets=[];skip=0
-        for m in markets:
+        bets=[];skip=0;markets_found=0
+        for m in iter_historical_markets(q,lambda pct,msg:upd(r,j,status="running",progress=pct,message=msg)):
+            markets_found+=1
             n=len(m.runners)
             if n<q.min_runners or(q.max_runners and n>q.max_runners):continue
             if not market_filters(m,q):continue
@@ -415,10 +418,13 @@ def work(j,qd,h,run_id):
             if n in groups:
                 z=stats(groups[n]);bands.append({"band":n,"bets":z["bets"],"wins":z["wins"],"strike":z["strike"],"gross":z["gross"],"net":z["net"],"roi":z["stake_roi"]})
         graph_points=[]; cumulative=0.0
-        for b in bets:
+        graph_limit=max(500,int(os.getenv("MAX_GRAPH_POINTS","5000")))
+        graph_step=max(1,math.ceil(len(bets)/graph_limit)) if bets else 1
+        for i,b in enumerate(bets):
             cumulative+=b.net
-            graph_points.append({"market_time":b.market_time,"event_name":b.event_name,"horse":b.horse,"bsp":round(b.bsp,4),"bet_type":b.bet_type,"bet_net":round(b.net,4),"cumulative":round(cumulative,4)})
-        out={"price_source":"latest pre-start last_traded_price (not BSP)","engine_version":ENGINE,"cache_hash":h,"request":norm(q),"stats":s,"bands":bands,"graph_points":graph_points,"bets":[asdict(x) for x in bets[:MAX_BETS]],"bets_truncated":len(bets)>MAX_BETS,"total_bets":len(bets),"markets_found":len(markets),"skipped":skip,"elapsed_seconds":round(time.time()-t,3)}
+            if i%graph_step==0 or i==len(bets)-1:
+                graph_points.append({"market_time":b.market_time,"event_name":b.event_name,"horse":b.horse,"bsp":round(b.bsp,4),"bet_type":b.bet_type,"bet_net":round(b.net,4),"cumulative":round(cumulative,4)})
+        out={"price_source":"latest pre-start last_traded_price (not BSP)","engine_version":ENGINE,"cache_hash":h,"request":norm(q),"stats":s,"bands":bands,"graph_points":graph_points,"bets":[asdict(x) for x in bets[:MAX_BETS]],"bets_truncated":len(bets)>MAX_BETS,"total_bets":len(bets),"markets_found":markets_found,"skipped":skip,"elapsed_seconds":round(time.time()-t,3)}
         r.putj(rk(h),out)
         save_run(r,run_id,status="complete",job_id=j,result_hash=h,engine_version=ENGINE,request=out["request"],
                  roi=round(s["stake_roi"],6),net=round(s["net"],6),bets=s["bets"],strike=round(s["strike"],6),
