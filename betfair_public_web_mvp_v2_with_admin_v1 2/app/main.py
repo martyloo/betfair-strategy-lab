@@ -13,7 +13,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel,Field
 from starlette.middleware.sessions import SessionMiddleware
 
-ENGINE="public-web-v5.1-duckdb-streaming"; ROOT=Path(os.getenv("BETFAIR_WEB_CACHE",Path.home()/".betfair-public-web-cache"));ROOT.mkdir(parents=True,exist_ok=True)
+ENGINE="public-web-v5.2-duckdb-all-matching"; ROOT=Path(os.getenv("BETFAIR_WEB_CACHE",Path.home()/".betfair-public-web-cache"));ROOT.mkdir(parents=True,exist_ok=True)
 WORKERS=max(1,int(os.getenv("BACKTEST_WORKERS","1")))
 MAX_BETS=max(100,int(os.getenv("MAX_BETS_RETURNED","5000")))
 DB_PATH=Path(os.getenv("BETFAIR_DUCKDB_PATH",str(ROOT/"betfair.duckdb")))
@@ -408,8 +408,16 @@ def work(j,qd,h,run_id):
             n=len(m.runners)
             if n<q.min_runners or(q.max_runners and n>q.max_runners):continue
             if not market_filters(m,q):continue
-            rr=pick(m,q.strategy,q.nth)
-            if rr and runner_filters(rr,q) and q.min_odds<=rr.bsp<=q.max_odds:bets.append(settle(m,rr,q))
+            if q.strategy in ("Lay all horses matching odds filter","Back all horses matching odds filter"):
+                # These strategies deliberately create one bet for every runner in the
+                # race that passes the selected-runner filters and horse-odds range.
+                for rr in m.runners:
+                    if runner_filters(rr,q) and q.min_odds<=rr.bsp<=q.max_odds:
+                        bets.append(settle(m,rr,q))
+            else:
+                rr=pick(m,q.strategy,q.nth)
+                if rr and runner_filters(rr,q) and q.min_odds<=rr.bsp<=q.max_odds:
+                    bets.append(settle(m,rr,q))
         bets.sort(key=lambda x:x.market_time);s=stats(bets);groups={}
         for b in bets:groups.setdefault(band(b.bsp),[]).append(b)
         bands=[]
