@@ -13,7 +13,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel,Field
 from starlette.middleware.sessions import SessionMiddleware
 
-ENGINE="public-web-v5.2-duckdb-all-matching"; ROOT=Path(os.getenv("BETFAIR_WEB_CACHE",Path.home()/".betfair-public-web-cache"));ROOT.mkdir(parents=True,exist_ok=True)
+ENGINE="public-web-v5.3-duckdb-race-classification"; ROOT=Path(os.getenv("BETFAIR_WEB_CACHE",Path.home()/".betfair-public-web-cache"));ROOT.mkdir(parents=True,exist_ok=True)
 WORKERS=max(1,int(os.getenv("BACKTEST_WORKERS","1")))
 MAX_BETS=max(100,int(os.getenv("MAX_BETS_RETURNED","5000")))
 DB_PATH=Path(os.getenv("BETFAIR_DUCKDB_PATH",str(ROOT/"betfair.duckdb")))
@@ -309,6 +309,37 @@ def normalized_time(v):
         return d.replace(tzinfo=timezone.utc) if d.tzinfo is None else d.astimezone(timezone.utc)
     except (TypeError,ValueError):return None
 
+
+def classify_race_name(race_name):
+    """Derive GB race filters from the compact DB race_name without changing the DB schema."""
+    raw=str(race_name or "").strip()
+    s=" "+re.sub(r"[^A-Z0-9]+"," ",raw.upper()).strip()+" "
+    if re.search(r"\b(NHF|N H FLAT|NATIONAL HUNT FLAT|BUMPER)\b",s):race_code="NH Flat / Bumper"
+    elif re.search(r"\b(CHS|CHASE)\b",s):race_code="Chase"
+    elif re.search(r"\b(HRD|HURDLE|HURDLES)\b",s):race_code="Hurdle"
+    else:race_code="Flat"
+    handicap_status="Handicap" if re.search(r"\b(HCAP|HANDICAP|NURSERY)\b",s) else "Non-handicap"
+    categories=[]
+    def add(name):
+        if name not in categories:categories.append(name)
+    if re.search(r"\b(MDN|MAIDEN)\b",s):add("Maiden")
+    if re.search(r"\b(NOV|NOVICE|NOVICES)\b",s):add("Novice")
+    if re.search(r"\bNURSERY\b",s):add("Nursery")
+    if re.search(r"\b(STKS|STAKE|STAKES)\b",s):add("Stakes")
+    if re.search(r"\b(COND|CONDITIONS)\b",s):add("Conditions")
+    if re.search(r"\b(SELL|SELLING)\b",s):add("Selling")
+    if re.search(r"\b(CLM|CLAIM|CLAIMING)\b",s):add("Claiming")
+    if not categories:add("Other")
+    race_grade=""
+    for label,pattern in [("Group 1",r"\b(?:GRP|GROUP)\s*1\b"),("Group 2",r"\b(?:GRP|GROUP)\s*2\b"),("Group 3",r"\b(?:GRP|GROUP)\s*3\b"),("Grade 1",r"\b(?:GD|GRADE)\s*1\b"),("Grade 2",r"\b(?:GD|GRADE)\s*2\b"),("Grade 3",r"\b(?:GD|GRADE)\s*3\b"),("Listed",r"\b(?:LISTED|LSTD|LST)\b")]:
+        if re.search(pattern,s):race_grade=label;break
+    return race_code,handicap_status,"|".join(categories),race_grade
+
+def make_compact_market(m0,mt,country,venue,race_name,event_name,distance,rs):
+    dt=normalized_time(mt)
+    race_code,handicap_status,race_category,race_grade=classify_race_name(race_name)
+    return Market(str(m0),dt.isoformat() if dt else str(mt),str(event_name or race_name or ""),str(country or "").upper(),rs,venue=str(venue or ""),distance=str(distance or ""),race_code=race_code,handicap_status=handicap_status,race_category=race_category,race_grade=race_grade)
+
 def iter_historical_markets(q,progress=None):
     """Stream one market at a time from DuckDB so long backtests stay within Render RAM."""
     path=ensure_compact_db()
@@ -341,9 +372,8 @@ def iter_historical_markets(q,progress=None):
                 if current_mid is not None and mid!=current_mid:
                     if race_meta is not None and len(rs)>=2 and sum(x.winner for x in rs)==1:
                         m0,mt,country,venue,race_name,event_name,distance=race_meta
-                        dt=normalized_time(mt)
                         markets_seen+=1
-                        yield Market(str(m0),dt.isoformat() if dt else str(mt),str(event_name or race_name or ""),str(country or "").upper(),rs,venue=str(venue or ""),distance=str(distance or ""))
+                        yield make_compact_market(m0,mt,country,venue,race_name,event_name,distance,rs)
                     rs=[]
                 if mid!=current_mid:
                     current_mid=mid;race_meta=row[:7]
@@ -355,8 +385,8 @@ def iter_historical_markets(q,progress=None):
                 progress(50,f"Streaming historical data… {rows_seen:,} runner rows read, {markets_seen:,} races processed")
         if current_mid is not None and race_meta is not None and len(rs)>=2 and sum(x.winner for x in rs)==1:
             m0,mt,country,venue,race_name,event_name,distance=race_meta
-            dt=normalized_time(mt);markets_seen+=1
-            yield Market(str(m0),dt.isoformat() if dt else str(mt),str(event_name or race_name or ""),str(country or "").upper(),rs,venue=str(venue or ""),distance=str(distance or ""))
+            markets_seen+=1
+            yield make_compact_market(m0,mt,country,venue,race_name,event_name,distance,rs)
     finally:
         con.close()
     if progress:progress(94,f"Processed {markets_seen:,} eligible races from compact database…")
@@ -393,7 +423,9 @@ def market_filters(m,q):
     if q.race_codes and m.race_code not in q.race_codes:return False
     if q.distances and m.distance not in q.distances:return False
     if q.handicap_status and m.handicap_status!=q.handicap_status:return False
-    if q.race_categories and m.race_category not in q.race_categories:return False
+    if q.race_categories:
+        market_categories={x for x in str(m.race_category or "").split("|") if x}
+        if not market_categories.intersection(q.race_categories):return False
     if q.race_grades and m.race_grade not in q.race_grades:return False
     return True
 def runner_filters(r,q):
@@ -461,7 +493,7 @@ def filter_options(plan:str="Basic Plan",country:str="GB"):
         """,[country.upper()]).fetchall()
     finally:con.close()
     venues=sorted({str(v) for v,d in rows if v});distances=sorted({str(d) for v,d in rows if d})
-    return {"venues":venues,"distances":distances,"race_codes":[],"race_categories":[],"race_grades":[]}
+    return {"venues":venues,"distances":distances,"race_codes":["Flat","Hurdle","Chase","NH Flat / Bumper"],"race_categories":["Maiden","Novice","Nursery","Stakes","Conditions","Selling","Claiming","Other"],"race_grades":["Group 1","Group 2","Group 3","Grade 1","Grade 2","Grade 3","Listed"]}
 
 @app.get("/api/health")
 def health():
