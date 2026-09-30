@@ -469,24 +469,137 @@ def health():
         r=R2();r.test();path=ensure_compact_db();info=validate_compact_db(path)
         return {"ok":True,"r2":True,"duckdb":True,"database":info,"workers":WORKERS,"engine":ENGINE}
     except Exception as e:return {"ok":False,"r2":False,"duckdb":False,"workers":WORKERS,"engine":ENGINE,"error":str(e)}
-@app.post("/api/jobs",status_code=202)
-def create(q:Req):
-    if q.from_date>q.to_date:raise HTTPException(400,"From date must be before To date.")
-    if q.min_odds>q.max_odds:raise HTTPException(400,"Minimum BSP cannot exceed maximum BSP.")
-    q.countries=sorted(set(x.upper().strip() for x in q.countries if x.strip()))
-    r=R2();h=hsh(q);cached=r.getj(rk(h));j=uuid.uuid4().hex;run_id=uuid.uuid4().hex
-    base=dict(status="queued",job_id=j,result_hash=h,engine_version=ENGINE,request=norm(q),strategy=q.strategy,
-              from_date=str(q.from_date),to_date=str(q.to_date),countries=q.countries)
+@app.post("/api/jobs", status_code=202)
+def create(q: Req):
+
+    if q.from_date > q.to_date:
+        raise HTTPException(
+            400,
+            "From date must be before To date."
+        )
+
+    if q.min_odds > q.max_odds:
+        raise HTTPException(
+            400,
+            "Minimum BSP cannot exceed maximum BSP."
+        )
+
+    q.countries = sorted(
+        set(
+            x.upper().strip()
+            for x in q.countries
+            if x.strip()
+        )
+    )
+
+    r = R2()
+    h = hsh(q)
+    cached = r.getj(rk(h))
+
+    j = uuid.uuid4().hex
+    run_id = uuid.uuid4().hex
+
+    base = dict(
+        status="queued",
+        job_id=j,
+        result_hash=h,
+        engine_version=ENGINE,
+        request=norm(q),
+        strategy=q.strategy,
+        from_date=str(q.from_date),
+        to_date=str(q.to_date),
+        countries=q.countries
+    )
+
+    # ========================================================
+    # CACHED RESULT
+    # ========================================================
+
     if cached:
-        st=cached.get("stats",{})
-        save_run(r,run_id,**base,status="complete",roi=round(float(st.get("stake_roi",0)),6),
-                 net=round(float(st.get("net",0)),6),bets=int(st.get("bets",0)),strike=round(float(st.get("strike",0)),6),cached=True)
-        upd(r,j,status="complete",progress=100,message="Loaded from persistent result cache.",result_hash=h,run_id=run_id,cached=True,elapsed_seconds=0)
-        return {"job_id":j,"run_id":run_id,"status":"complete","cached":True}
-    save_run(r,run_id,**base,cached=False)
-    upd(r,j,status="queued",progress=0,message="Backtest queued.",result_hash=h,run_id=run_id,cached=False)
-    POOL.submit(work,j,q.model_dump(mode="json"),h,run_id)
-    return {"job_id":j,"run_id":run_id,"status":"queued","cached":False}
+
+        st = cached.get("stats", {})
+
+        cached_run = {
+            **base,
+            "status": "complete",
+            "roi": round(
+                float(st.get("stake_roi", 0)),
+                6
+            ),
+            "net": round(
+                float(st.get("net", 0)),
+                6
+            ),
+            "bets": int(
+                st.get("bets", 0)
+            ),
+            "strike": round(
+                float(st.get("strike", 0)),
+                6
+            ),
+            "cached": True,
+        }
+
+        save_run(
+            r,
+            run_id,
+            **cached_run
+        )
+
+        upd(
+            r,
+            j,
+            status="complete",
+            progress=100,
+            message="Loaded from persistent result cache.",
+            result_hash=h,
+            run_id=run_id,
+            cached=True,
+            elapsed_seconds=0
+        )
+
+        return {
+            "job_id": j,
+            "run_id": run_id,
+            "status": "complete",
+            "cached": True
+        }
+
+    # ========================================================
+    # NEW BACKTEST - NOT CACHED
+    # ========================================================
+
+    save_run(
+        r,
+        run_id,
+        **base
+    )
+
+    upd(
+        r,
+        j,
+        status="queued",
+        progress=0,
+        message="Backtest queued.",
+        result_hash=h,
+        run_id=run_id,
+        cached=False
+    )
+
+    POOL.submit(
+        work,
+        j,
+        q.model_dump(mode="json"),
+        h,
+        run_id
+    )
+
+    return {
+        "job_id": j,
+        "run_id": run_id,
+        "status": "queued",
+        "cached": False
+    }
 
 @app.get("/api/jobs/{j}")
 def job(j:str):
