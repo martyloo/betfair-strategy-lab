@@ -21,6 +21,8 @@ DB_R2_BUCKET=os.getenv("BETFAIR_DUCKDB_R2_BUCKET","betfair-historical-database")
 DB_R2_KEY=os.getenv("BETFAIR_DUCKDB_R2_KEY","compact/betfair.duckdb").strip()
 DB_LOCK=threading.Lock()
 POOL=ThreadPoolExecutor(max_workers=WORKERS,thread_name_prefix="backtest"); LOCK=threading.Lock(); JOBS={}
+QUEUED_JOBS=[]
+RUNNING_JOBS=set()
 API_BASE="https://historicdata.betfair.com/api/"
 ADMIN_WORKERS=1; ADMIN_POOL=ThreadPoolExecutor(max_workers=ADMIN_WORKERS,thread_name_prefix="ingest"); ADMIN_JOBS={}; ADMIN_LOCK=threading.Lock()
 COUNTRIES=["GB","IE","US","AU","NZ","FR","DE","IT","ZA","AE","HK","SG","SE","NO","DK","ES","NL","BE","CA","CL","AR","BR","JP"]
@@ -430,7 +432,64 @@ def market_filters(m,q):
     return True
 def runner_filters(r,q):
     return between(r.ltp,q.selected_ltp_min,q.selected_ltp_max) and between(r.adjustment_factor,q.selected_adjustment_min,q.selected_adjustment_max) and between(r.sort_priority,q.selected_sort_priority_min,q.selected_sort_priority_max)
+def enqueue_job(j):
+    with LOCK:
+        if j not in QUEUED_JOBS:
+            QUEUED_JOBS.append(j)
+
+def mark_job_started(j):
+    with LOCK:
+        if j in QUEUED_JOBS:
+            QUEUED_JOBS.remove(j)
+        RUNNING_JOBS.add(j)
+
+def mark_job_finished(j):
+    with LOCK:
+        RUNNING_JOBS.discard(j)
+        if j in QUEUED_JOBS:
+            QUEUED_JOBS.remove(j)
+
+def queue_status(j, x):
+    """Add live queue information without replacing running-job progress messages."""
+    y = dict(x)
+
+    if y.get("status") != "queued":
+        y.pop("queue_position", None)
+        y.pop("jobs_ahead", None)
+        return y
+
+    with LOCK:
+        try:
+            pos = QUEUED_JOBS.index(j) + 1
+        except ValueError:
+            pos = None
+        running = len(RUNNING_JOBS)
+        queued = len(QUEUED_JOBS)
+
+    y["queue_position"] = pos
+    y["running_jobs"] = running
+    y["queued_jobs"] = queued
+
+    if pos is not None:
+        # queue_position counts this job itself.  jobs_ahead includes
+        # currently running work plus queued jobs in front of this job.
+        queued_ahead = pos - 1
+        ahead = running + queued_ahead
+        y["jobs_ahead"] = ahead
+
+        if ahead == 0:
+            y["message"] = "Queued — next to run. Your backtest will start automatically."
+        elif ahead == 1:
+            y["message"] = "Queued — 1 job ahead of you. Your backtest will start automatically."
+        else:
+            y["message"] = f"Queued — {ahead} jobs ahead of you. Your backtest will start automatically."
+    else:
+        y["message"] = y.get("message") or "Backtest queued — waiting for an available worker."
+
+    return y
+
 def work(j,qd,h,run_id):
+    mark_job_started(j)
     r=R2();q=Req(**qd);t=time.time()
     try:
         upd(r,j,status="running",progress=2,message="Querying compact DuckDB historical database…")
@@ -475,6 +534,8 @@ def work(j,qd,h,run_id):
         try: save_run(r,run_id,status="failed",job_id=j,result_hash=h,error=str(e))
         except: pass
         upd(r,j,status="failed",progress=100,message=str(e))
+    finally:
+        mark_job_finished(j)
 
 app=FastAPI(title="Betfair Strategy Lab");app.add_middleware(SessionMiddleware,secret_key=os.getenv("ADMIN_SESSION_SECRET",secrets.token_hex(32)),same_site="lax",https_only=os.getenv("COOKIE_SECURE","0")=="1");BASE=Path(__file__).parent
 app.mount("/static",StaticFiles(directory=BASE/"static"),name="static");templates=Jinja2Templates(directory=BASE/"templates")
@@ -618,13 +679,19 @@ def create(q: Req):
         cached=False
     )
 
-    POOL.submit(
-        work,
-        j,
-        q.model_dump(mode="json"),
-        h,
-        run_id
-    )
+    enqueue_job(j)
+
+    try:
+        POOL.submit(
+            work,
+            j,
+            q.model_dump(mode="json"),
+            h,
+            run_id
+        )
+    except Exception:
+        mark_job_finished(j)
+        raise
 
     return {
         "job_id": j,
@@ -635,10 +702,17 @@ def create(q: Req):
 
 @app.get("/api/jobs/{j}")
 def job(j:str):
-    with LOCK:x=JOBS.get(j)
-    if x:return x
+    with LOCK:
+        x=JOBS.get(j)
+        if x:
+            x=x.copy()
+    if x:
+        return queue_status(j,x)
+
     x=R2().getj(jk(j))
-    if x:return x
+    if x:
+        return queue_status(j,x)
+
     raise HTTPException(404,"Job not found.")
 @app.get("/api/jobs/{j}/result")
 def result(j:str):
