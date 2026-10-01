@@ -14,7 +14,10 @@ from pydantic import BaseModel,Field
 from starlette.middleware.sessions import SessionMiddleware
 
 ENGINE="public-web-v5.3-duckdb-race-classification"; ROOT=Path(os.getenv("BETFAIR_WEB_CACHE",Path.home()/".betfair-public-web-cache"));ROOT.mkdir(parents=True,exist_ok=True)
-WORKERS=max(1,int(os.getenv("BACKTEST_WORKERS","1")))
+# IMPORTANT: keep the public backtester strictly single-worker.
+# Additional requests stay queued and do not start DuckDB work until
+# the current backtest has completely finished.
+WORKERS=1
 MAX_BETS=max(100,int(os.getenv("MAX_BETS_RETURNED","5000")))
 DB_PATH=Path(os.getenv("BETFAIR_DUCKDB_PATH",str(ROOT/"betfair.duckdb")))
 DB_R2_BUCKET=os.getenv("BETFAIR_DUCKDB_R2_BUCKET","betfair-historical-database").strip()
@@ -471,20 +474,18 @@ def queue_status(j, x):
     y["queued_jobs"] = queued
 
     if pos is not None:
-        # queue_position counts this job itself.  jobs_ahead includes
-        # currently running work plus queued jobs in front of this job.
+        # Position is the waiting-list position only:
+        # current running backtest is NOT counted as a queue position.
         queued_ahead = pos - 1
-        ahead = running + queued_ahead
-        y["jobs_ahead"] = ahead
+        y["jobs_ahead"] = queued_ahead
+        y["queue_position"] = pos
 
-        if ahead == 0:
-            y["message"] = "Queued — next to run. Your backtest will start automatically."
-        elif ahead == 1:
-            y["message"] = "Queued — 1 job ahead of you. Your backtest will start automatically."
+        if pos == 1:
+            y["message"] = "QUEUED — No.1 in the queue. Your backtest will start automatically when the current backtest finishes."
         else:
-            y["message"] = f"Queued — {ahead} jobs ahead of you. Your backtest will start automatically."
+            y["message"] = f"QUEUED — No.{pos} in the queue. {queued_ahead} queued job{'s' if queued_ahead != 1 else ''} ahead of you. Your backtest will start automatically."
     else:
-        y["message"] = y.get("message") or "Backtest queued — waiting for an available worker."
+        y["message"] = y.get("message") or "QUEUED — waiting for the current backtest to finish."
 
     return y
 
@@ -693,11 +694,19 @@ def create(q: Req):
         mark_job_finished(j)
         raise
 
+    with LOCK:
+        try:
+            initial_queue_position = QUEUED_JOBS.index(j) + 1
+        except ValueError:
+            initial_queue_position = 1
+
     return {
         "job_id": j,
         "run_id": run_id,
         "status": "queued",
-        "cached": False
+        "cached": False,
+        "queue_position": initial_queue_position,
+        "message": f"QUEUED — No.{initial_queue_position} in the queue. Your backtest will start automatically."
     }
 
 @app.get("/api/jobs/{j}")
