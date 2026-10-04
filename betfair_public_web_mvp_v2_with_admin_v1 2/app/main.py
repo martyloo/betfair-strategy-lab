@@ -605,6 +605,39 @@ def create(q: Req):
         countries=q.countries
     )
 
+@app.get("/api/db-debug")
+def db_debug():
+    result = {
+        "local_path": str(DB_PATH),
+        "local_exists": DB_PATH.exists(),
+        "local_size": DB_PATH.stat().st_size if DB_PATH.exists() else None,
+        "db_r2_bucket": DB_R2_BUCKET,
+        "db_r2_key": DB_R2_KEY,
+        "general_r2_bucket": os.getenv("R2_BUCKET", ""),
+    }
+
+    try:
+        s3 = compact_db_store()
+
+        obj = s3.head_object(
+            Bucket=DB_R2_BUCKET,
+            Key=DB_R2_KEY
+        )
+
+        result["r2_object_size"] = obj.get("ContentLength")
+        result["r2_last_modified"] = str(obj.get("LastModified"))
+        result["r2_etag"] = obj.get("ETag")
+
+    except Exception as e:
+        result["r2_error"] = str(e)
+
+    try:
+        result["local_database"] = validate_compact_db(DB_PATH)
+    except Exception as e:
+        result["local_database_error"] = str(e)
+
+    return result
+
     # ========================================================
     # CACHED RESULT
     # ========================================================
