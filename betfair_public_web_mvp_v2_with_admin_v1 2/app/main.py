@@ -808,10 +808,19 @@ def automatic_update_once():
 
 @app.on_event("startup")
 def prepare_compact_database():
-    # Download and validate the compact DB before serving backtests. If startup
-    # cannot reach R2, keep the process alive so /api/health exposes the error.
-    try:ensure_compact_db()
-    except Exception as e:print(f"Compact database startup warning: {e}",flush=True)
+    # Always download the latest compact DB from R2 when Render starts.
+    # This ensures newly published historical data is immediately available.
+    try:
+        path = ensure_compact_db(force=True)
+        info = validate_compact_db(path)
+        print(
+            f"Compact database ready: "
+            f"{info['rows']:,} rows | "
+            f"{info['first_race']} -> {info['last_race']}",
+            flush=True
+        )
+    except Exception as e:
+        print(f"Compact database startup warning: {e}", flush=True)
 
 @app.on_event("startup")
 def start_auto_updater():
