@@ -588,8 +588,6 @@ def create(q: Req):
 
     r = R2()
     h = hsh(q)
-    cached = r.getj(rk(h))
-
     j = uuid.uuid4().hex
     run_id = uuid.uuid4().hex
 
@@ -606,62 +604,12 @@ def create(q: Req):
     )
 
     # ========================================================
-    # CACHED RESULT
+    # NEW BACKTEST - ALWAYS RUN FRESH
+    # Completed result JSON is still stored for this job/public-run retrieval,
+    # but it is never reused to skip a new backtest.
     # ========================================================
 
-    if cached:
 
-        st = cached.get("stats", {})
-
-        cached_run = {
-            **base,
-            "status": "complete",
-            "roi": round(
-                float(st.get("stake_roi", 0)),
-                6
-            ),
-            "net": round(
-                float(st.get("net", 0)),
-                6
-            ),
-            "bets": int(
-                st.get("bets", 0)
-            ),
-            "strike": round(
-                float(st.get("strike", 0)),
-                6
-            ),
-            "cached": True,
-        }
-
-        save_run(
-            r,
-            run_id,
-            **cached_run
-        )
-
-        upd(
-            r,
-            j,
-            status="complete",
-            progress=100,
-            message="Loaded from persistent result cache.",
-            result_hash=h,
-            run_id=run_id,
-            cached=True,
-            elapsed_seconds=0
-        )
-
-        return {
-            "job_id": j,
-            "run_id": run_id,
-            "status": "complete",
-            "cached": True
-        }
-
-    # ========================================================
-    # NEW BACKTEST - NOT CACHED
-    # ========================================================
 
     save_run(
         r,
