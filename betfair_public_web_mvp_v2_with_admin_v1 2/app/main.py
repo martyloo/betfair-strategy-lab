@@ -13,7 +13,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel,Field
 from starlette.middleware.sessions import SessionMiddleware
 
-ENGINE="public-web-v5.3-duckdb-race-classification"; ROOT=Path(os.getenv("BETFAIR_WEB_CACHE",Path.home()/".betfair-public-web-cache"));ROOT.mkdir(parents=True,exist_ok=True)
+ENGINE="public-web-v5.4-horse-selection"; ROOT=Path(os.getenv("BETFAIR_WEB_CACHE",Path.home()/".betfair-public-web-cache"));ROOT.mkdir(parents=True,exist_ok=True)
 # IMPORTANT: keep the public backtester strictly single-worker.
 # Additional requests stay queued and do not start DuckDB work until
 # the current backtest has completely finished.
@@ -206,6 +206,7 @@ class Req(BaseModel):
     race_categories:list[str]=Field(default_factory=list);race_grades:list[str]=Field(default_factory=list)
     selected_ltp_min:float|None=None;selected_ltp_max:float|None=None;selected_adjustment_min:float|None=None;selected_adjustment_max:float|None=None
     selected_sort_priority_min:int|None=None;selected_sort_priority_max:int|None=None
+    horse_selection_ids:list[int]=Field(default_factory=list);horse_bet_type:str="Back"
 
 def slug(s):return s.lower().replace(" ","-")
 def months(a,b):
@@ -245,7 +246,7 @@ def pick(m,s,n):
     if s in ("Back longest outsider","Lay longest outsider"):return a[-1]
     return a[n-1] if n<=len(a) else None
 def settle(m,r,q):
-    rate=q.commission/100;lay=q.strategy.startswith("Lay")
+    rate=q.commission/100;lay=(q.horse_bet_type=="Lay" if q.horse_selection_ids else q.strategy.startswith("Lay"))
     if lay:
         if q.stake_mode=="Fixed liability":li=q.amount;st=li/(r.bsp-1)
         else:st=q.amount;li=(r.bsp-1)*st
@@ -500,7 +501,12 @@ def work(j,qd,h,run_id):
             n=len(m.runners)
             if n<q.min_runners or(q.max_runners and n>q.max_runners):continue
             if not market_filters(m,q):continue
-            if q.strategy in ("Lay all horses matching odds filter","Back all horses matching odds filter"):
+            if q.horse_selection_ids:
+                wanted_horses=set(q.horse_selection_ids)
+                for rr in m.runners:
+                    if rr.selection_id in wanted_horses and runner_filters(rr,q) and q.min_odds<=rr.bsp<=q.max_odds:
+                        bets.append(settle(m,rr,q))
+            elif q.strategy in ("Lay all horses matching odds filter","Back all horses matching odds filter"):
                 # These strategies deliberately create one bet for every runner in the
                 # race that passes the selected-runner filters and horse-odds range.
                 for rr in m.runners:
@@ -557,6 +563,25 @@ def filter_options(plan:str="Basic Plan",country:str="GB"):
     venues=sorted({str(v) for v,d in rows if v});distances=sorted({str(d) for v,d in rows if d})
     return {"venues":venues,"distances":distances,"race_codes":["Flat","Hurdle","Chase","NH Flat / Bumper"],"race_categories":["Maiden","Novice","Nursery","Stakes","Conditions","Selling","Claiming","Other"],"race_grades":["Group 1","Group 2","Group 3","Grade 1","Grade 2","Grade 3","Listed"]}
 
+@app.get("/api/horses")
+def search_horses(q:str="",limit:int=30):
+    term=q.strip()
+    if len(term)<2:return {"horses":[]}
+    path=ensure_compact_db();con=duckdb.connect(str(path),read_only=True)
+    try:
+        # Search the existing compact runner table; no DB rebuild required.
+        rows=con.execute("""
+            SELECT selection_id, MIN(horse_name) AS name, COUNT(DISTINCT market_id) AS races
+            FROM backtest_runners
+            WHERE horse_name ILIKE ? AND selection_id IS NOT NULL
+            GROUP BY selection_id
+            ORDER BY CASE WHEN LOWER(MIN(horse_name))=LOWER(?) THEN 0 ELSE 1 END,
+                     races DESC, name
+            LIMIT ?
+        """,["%"+term+"%",term,max(1,min(limit,50))]).fetchall()
+        return {"horses":[{"selection_id":int(sid),"name":name,"races":int(n)} for sid,name,n in rows]}
+    finally:con.close()
+
 @app.get("/api/health")
 def health():
     try:
@@ -586,6 +611,8 @@ def create(q: Req):
         )
     )
 
+    if q.horse_selection_ids and q.horse_bet_type not in ("Back","Lay"):
+        raise HTTPException(400,"Horse bet type must be Back or Lay.")
     r = R2()
     h = hsh(q)
     j = uuid.uuid4().hex
